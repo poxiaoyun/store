@@ -1,4 +1,5 @@
-package sql
+// Package mysql implements the MySQL dialect for SQL Store.
+package mysql
 
 import (
 	"context"
@@ -8,31 +9,63 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
+	storesql "xiaoshiai.cn/store/sql"
 )
 
-type MySQLDialect struct{}
+// Open creates the database named by the native MySQL DSN if necessary and
+// returns a caller-owned connection pool. Time decoding uses UTC, and affected
+// row counts report matched rows so conditional Store writes can detect misses.
+func Open(ctx context.Context, dsn string) (*sql.DB, error) {
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	config.ParseTime = true
+	config.Loc = time.UTC
+	config.ClientFoundRows = true
+	adminConfig := config.Clone()
+	adminConfig.DBName = ""
+	connector, err := mysql.NewConnector(adminConfig)
+	if err != nil {
+		return nil, err
+	}
+	admin := sql.OpenDB(connector)
+	defer admin.Close()
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+(Dialect{}).Quote(config.DBName)); err != nil {
+		return nil, err
+	}
+	connector, err = mysql.NewConnector(config)
+	if err != nil {
+		return nil, err
+	}
+	return sql.OpenDB(connector), nil
+}
 
-func (MySQLDialect) Name() string { return DBDriverMySQL }
+// Dialect implements storesql.Dialect. Its zero value is ready to use.
+type Dialect struct{}
 
-func (MySQLDialect) Quote(ident string) string {
+var _ storesql.Dialect = Dialect{}
+
+func (Dialect) Quote(ident string) string {
 	return "`" + strings.ReplaceAll(ident, "`", "``") + "`"
 }
 
-func (MySQLDialect) Placeholder(int) string { return "?" }
+func (Dialect) Placeholder(int) string { return "?" }
 
-func (MySQLDialect) ColumnType(field string, t reflect.Type, size int, indexed bool) (string, error) {
-	base := DerefType(t)
+func (Dialect) ColumnType(field string, t reflect.Type, size int, indexed bool) (string, error) {
+	base := storesql.DerefType(t)
 	switch {
-	case IsTimeType(base):
+	case storesql.IsTimeType(base):
 		return "datetime(6)", nil
 	case base.Kind() == reflect.String:
 		if indexed {
 			if size <= 0 {
-				size = DefaultIndexedStringSize
+				size = storesql.DefaultIndexedStringSize
 			}
 			return fmt.Sprintf("varchar(%d)", size), nil
 		}
@@ -55,7 +88,7 @@ func (MySQLDialect) ColumnType(field string, t reflect.Type, size int, indexed b
 	}
 }
 
-func (d MySQLDialect) CreateTable(table string, columns []ColumnSpec) (string, error) {
+func (d Dialect) CreateTable(table string, columns []storesql.ColumnSpec) (string, error) {
 	definitions := make([]string, 0, len(columns)+1)
 	for _, column := range columns {
 		definition, err := d.columnDefinition(column)
@@ -68,7 +101,7 @@ func (d MySQLDialect) CreateTable(table string, columns []ColumnSpec) (string, e
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", d.Quote(table), strings.Join(definitions, ", ")), nil
 }
 
-func (d MySQLDialect) AddColumn(table string, column ColumnSpec) (string, error) {
+func (d Dialect) AddColumn(table string, column storesql.ColumnSpec) (string, error) {
 	definition, err := d.columnDefinition(column)
 	if err != nil {
 		return "", err
@@ -76,7 +109,7 @@ func (d MySQLDialect) AddColumn(table string, column ColumnSpec) (string, error)
 	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", d.Quote(table), definition), nil
 }
 
-func (d MySQLDialect) columnDefinition(column ColumnSpec) (string, error) {
+func (d Dialect) columnDefinition(column storesql.ColumnSpec) (string, error) {
 	columnType, err := d.ColumnType(column.Name, column.Type, column.Size, column.Indexed)
 	if err != nil {
 		return "", err
@@ -89,7 +122,7 @@ func (d MySQLDialect) columnDefinition(column ColumnSpec) (string, error) {
 const mysqlRowLimit = "18446744073709551615"
 
 // Window renders the row window. MySQL rejects OFFSET without LIMIT.
-func (MySQLDialect) Window(limitPlaceholder, offsetPlaceholder string) string {
+func (Dialect) Window(limitPlaceholder, offsetPlaceholder string) string {
 	switch {
 	case offsetPlaceholder == "":
 		if limitPlaceholder == "" {
@@ -104,12 +137,12 @@ func (MySQLDialect) Window(limitPlaceholder, offsetPlaceholder string) string {
 }
 
 // JSONValue casts JSON text into a JSON value.
-func (MySQLDialect) JSONValue(placeholder string) string {
+func (Dialect) JSONValue(placeholder string) string {
 	return "CAST(" + placeholder + " AS JSON)"
 }
 
-func (MySQLDialect) JSONText(column string, remainingPath []string) (string, error) {
-	return fmt.Sprintf("JSON_UNQUOTE(JSON_EXTRACT(%s, %s))", column, quotedLiteral(mysqlJSONPath(remainingPath))), nil
+func (Dialect) JSONText(column string, remainingPath []string) (string, error) {
+	return fmt.Sprintf("JSON_UNQUOTE(JSON_EXTRACT(%s, %s))", column, storesql.QuoteLiteral(mysqlJSONPath(remainingPath))), nil
 }
 
 // mysqlJSONPath renders a path whose segments are quoted, so a label key that
@@ -124,16 +157,16 @@ func mysqlJSONPath(path []string) string {
 	return "$." + strings.Join(segments, ".")
 }
 
-func (d MySQLDialect) IndexDDL(table string, index store.Index) ([]string, error) {
+func (d Dialect) IndexDDL(table string, index store.Index) ([]string, error) {
 	columns := make([]string, 0, len(index.Fields))
 	statements := make([]string, 0, len(index.Fields)+1)
 	for _, field := range index.Fields {
-		if !IsNestedField(field) {
+		if !storesql.IsNestedField(field) {
 			columns = append(columns, d.Quote(field))
 			continue
 		}
-		path := JSONPath(field)
-		column := GeneratedColumnName(table, path)
+		path := storesql.JSONPath(field)
+		column := generatedColumnName(path)
 		expression := d.indexExpression(path)
 		// A unique index must materialize the expression. MySQL indexes a
 		// stored generated column; plain secondary indexes accept a virtual one.
@@ -143,7 +176,7 @@ func (d MySQLDialect) IndexDDL(table string, index store.Index) ([]string, error
 		}
 		statements = append(statements, fmt.Sprintf(
 			"ALTER TABLE %s ADD COLUMN %s varchar(%d) GENERATED ALWAYS AS (%s) %s",
-			d.Quote(table), d.Quote(column), DefaultIndexedStringSize, expression, kind,
+			d.Quote(table), d.Quote(column), storesql.DefaultIndexedStringSize, expression, kind,
 		))
 		columns = append(columns, d.Quote(column))
 	}
@@ -159,7 +192,7 @@ func (d MySQLDialect) IndexDDL(table string, index store.Index) ([]string, error
 	return statements, nil
 }
 
-func (MySQLDialect) Columns(ctx context.Context, db StatementExecutor, table string) (map[string]ColumnInfo, error) {
+func (Dialect) Columns(ctx context.Context, db storesql.StatementExecutor, table string) (map[string]storesql.ColumnInfo, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT COLUMN_NAME, COLUMN_TYPE
 FROM information_schema.columns
@@ -168,9 +201,9 @@ WHERE table_schema = DATABASE() AND table_name = ?`, table)
 		return nil, err
 	}
 	defer rows.Close()
-	result := map[string]ColumnInfo{}
+	result := map[string]storesql.ColumnInfo{}
 	for rows.Next() {
-		var info ColumnInfo
+		var info storesql.ColumnInfo
 		if err := rows.Scan(&info.Name, &info.Type); err != nil {
 			return nil, err
 		}
@@ -181,11 +214,11 @@ WHERE table_schema = DATABASE() AND table_name = ?`, table)
 
 // indexExpression uses an explicit character set so catalog comparison does
 // not depend on the session's default character set.
-func (d MySQLDialect) indexExpression(path []string) string {
-	return "json_unquote(json_extract(" + d.Quote(path[0]) + ",_utf8mb4" + quotedLiteral(mysqlJSONPath(path[1:])) + "))"
+func (d Dialect) indexExpression(path []string) string {
+	return "json_unquote(json_extract(" + d.Quote(path[0]) + ",_utf8mb4" + storesql.QuoteLiteral(mysqlJSONPath(path[1:])) + "))"
 }
 
-func (d MySQLDialect) ValidateIndex(ctx context.Context, db StatementExecutor, table string, index store.Index) error {
+func (d Dialect) ValidateIndex(ctx context.Context, db storesql.StatementExecutor, table string, index store.Index) error {
 	rows, err := db.QueryContext(ctx, `
 SELECT s.NON_UNIQUE, s.COLUMN_NAME, c.GENERATION_EXPRESSION, s.SUB_PART
 FROM information_schema.statistics s
@@ -210,9 +243,9 @@ ORDER BY s.SEQ_IN_INDEX`, table, index.Name)
 		}
 		field := index.Fields[position]
 		matches := column.String == field && expression.String == ""
-		if IsNestedField(field) {
+		if storesql.IsNestedField(field) {
 			// MySQL escapes quotes in INFORMATION_SCHEMA's expression text.
-			expected := strings.ReplaceAll(d.indexExpression(JSONPath(field)), "'", `\'`)
+			expected := strings.ReplaceAll(d.indexExpression(storesql.JSONPath(field)), "'", `\'`)
 			matches = expression.String == expected
 		}
 		if !matches {
@@ -229,7 +262,7 @@ ORDER BY s.SEQ_IN_INDEX`, table, index.Name)
 	return nil
 }
 
-func (MySQLDialect) Indexes(ctx context.Context, db StatementExecutor, table string) (map[string]IndexInfo, error) {
+func (Dialect) Indexes(ctx context.Context, db storesql.StatementExecutor, table string) (map[string]storesql.IndexInfo, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT INDEX_NAME, COLUMN_NAME
 FROM information_schema.statistics
@@ -239,7 +272,7 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX`, table)
 		return nil, err
 	}
 	defer rows.Close()
-	result := map[string]IndexInfo{}
+	result := map[string]storesql.IndexInfo{}
 	for rows.Next() {
 		var (
 			name   string
@@ -258,7 +291,7 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX`, table)
 	return result, rows.Err()
 }
 
-func (MySQLDialect) MapError(err error, resource, name string) error {
+func (Dialect) MapError(err error, resource, name string) error {
 	if stderrors.Is(err, sql.ErrNoRows) {
 		return errors.NewNotFound(resource, name)
 	}
@@ -276,7 +309,7 @@ func (MySQLDialect) MapError(err error, resource, name string) error {
 	return err
 }
 
-func (MySQLDialect) IsRetryableConflict(err error) bool {
+func (Dialect) IsRetryableConflict(err error) bool {
 	var mysqlErr *mysql.MySQLError
 	if stderrors.As(err, &mysqlErr) {
 		switch mysqlErr.Number {
@@ -287,15 +320,18 @@ func (MySQLDialect) IsRetryableConflict(err error) bool {
 	return false
 }
 
-// ---------------------------------------------------------------------------
-
-func (MySQLDialect) Distinct(left, right string) string {
+func (Dialect) Distinct(left, right string) string {
 	return "NOT (BINARY " + left + " <=> BINARY " + right + ")"
 }
-func (MySQLDialect) MergeDocument(q *QueryState, column string, patch map[string]any) string {
+func (Dialect) MergeDocument(q *storesql.QueryState, column string, patch map[string]any) string {
 	data, _ := json.Marshal(patch)
 	return "JSON_MERGE_PATCH(COALESCE(" + column + ", JSON_OBJECT()), CAST(" + q.Bind(string(data)) + " AS JSON))"
 }
-func (MySQLDialect) FinalizersEmpty(column string) string {
+func (Dialect) FinalizersEmpty(column string) string {
 	return "(" + column + " IS NULL OR JSON_TYPE(" + column + ") = 'NULL' OR JSON_LENGTH(" + column + ") = 0)"
+}
+
+// generatedColumnName identifies the materialized nested index path.
+func generatedColumnName(path []string) string {
+	return "idx_" + strings.Join(path, "_")
 }

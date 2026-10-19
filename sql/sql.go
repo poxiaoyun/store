@@ -4,78 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	stderrors "errors"
 	"fmt"
-	"net/url"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
 
 var _ store.PingableStore = &Storage{}
 
-const (
-	DBDriverPostgres = "postgres"
-	DBDriverMySQL    = "mysql"
-)
-
-// defaultMaxTransactionRetries bounds the retries of a transaction aborted by a
-// retryable conflict, such as a deadlock or a serialization failure.
+// defaultMaxTransactionRetries bounds retries of an aborted transaction.
 const defaultMaxTransactionRetries = 3
-
-func NewDefaultOptions() *Options {
-	return &Options{
-		Addr:     "postgres:5432",
-		Username: "postgres",
-		Password: "",
-		Driver:   DBDriverPostgres,
-		Database: "",
-		Params:   map[string]string{},
-	}
-}
-
-// nolint: tagalign
-type Options struct {
-	Addr     string            `json:"addr" description:"database host addr"`
-	Driver   string            `json:"driver" description:"databse driver, mysql or postgres"`
-	Username string            `json:"username" description:"database username"`
-	Password string            `json:"password" description:"database password"`
-	Database string            `json:"database" description:"database to use"`
-	Params   map[string]string `json:"params" description:"additional database connection parameters"`
-}
-
-// ConnectionString returns the connection string for the database without the driver schema.
-// for mysql, it returns "user:password@tcp(host:port)/database".
-// for postgres, it returns "user:password@host:port/database".
-func (o *Options) ConnectionString() string {
-	switch o.Driver {
-	case DBDriverMySQL:
-		values := url.Values{}
-		values.Add("parseTime", "True")
-		values.Add("loc", "UTC")
-		// A conditional write decides NotFound or Conflict from the row count,
-		// so it needs the matched rows rather than the changed rows.
-		values.Add("clientFoundRows", "True")
-		return fmt.Sprintf("mysql://%s:%s@tcp(%s)/%s?%s", o.Username, o.Password, o.Addr, o.Database, values.Encode())
-	case DBDriverPostgres:
-		values := url.Values{}
-		values.Add("sslmode", "disable")
-		values.Add("timezone", "UTC")
-		if o.Database == "" {
-			return fmt.Sprintf("postgres://%s:%s@%s?%s", o.Username, o.Password, o.Addr, values.Encode())
-		}
-		return fmt.Sprintf("postgres://%s:%s@%s/%s?%s", o.Username, o.Password, o.Addr, o.Database, values.Encode())
-	default:
-		return ""
-	}
-}
 
 // core is the execution layer shared by every view of one SQL Store: the
 // dialect, the model codec, the registered schema and the statement handles.
@@ -99,23 +42,13 @@ type Storage struct {
 	scopes []store.Scope
 }
 
-// NewStorage opens the configured database, reconciles the registered resource
-// schema and returns the root Store.
-func NewStorage(ctx context.Context, schema *store.Schema, options *Options) (*Storage, error) {
-	dialect, err := NewDialect(options.Driver)
-	if err != nil {
-		return nil, err
-	}
+// NewStorage binds a caller-owned database and dialect, reconciles the registered
+// resource schema and returns the root Store. The caller owns connection settings,
+// database provisioning and closing the database, including on construction failure.
+func NewStorage(ctx context.Context, schema *store.Schema, db Database, dialect Dialect) (*Storage, error) {
 	cloned, err := schema.Clone()
 	if err != nil {
 		return nil, err
-	}
-	if err := createDatabaseIfNotExists(ctx, options); err != nil {
-		return nil, fmt.Errorf("failed to create database: %w", err)
-	}
-	db, err := sql.Open(driverName(options.Driver), dataSourceName(options.Driver, options.ConnectionString()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
 	storage := &Storage{core: &core{
 		dialect:  dialect,
@@ -125,64 +58,9 @@ func NewStorage(ctx context.Context, schema *store.Schema, options *Options) (*S
 		exec:     db,
 	}}
 	if err := storage.ensureSchema(ctx); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return storage, nil
-}
-
-func driverName(driver string) string {
-	switch driver {
-	case DBDriverMySQL:
-		return "mysql"
-	case DBDriverPostgres:
-		return "pgx"
-	default:
-		return driver
-	}
-}
-
-// dataSourceName adapts the connection string to the driver: go-sql-driver
-// wants the MySQL DSN without its scheme, while pgx accepts the URL as is.
-func dataSourceName(driver, connectionString string) string {
-	switch driver {
-	case DBDriverMySQL:
-		return strings.TrimPrefix(connectionString, "mysql://")
-	default:
-		return connectionString
-	}
-}
-
-func createDatabaseIfNotExists(ctx context.Context, options *Options) error {
-	nodboptions := *options
-	nodboptions.Database = ""
-	driver, dsn, dbname := nodboptions.Driver, nodboptions.ConnectionString(), options.Database
-
-	switch driver {
-	case DBDriverMySQL:
-		db, err := sql.Open("mysql", dataSourceName(driver, dsn))
-		if err != nil {
-			return fmt.Errorf("failed to open database connection: %w", err)
-		}
-		defer db.Close()
-		_, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+dbname+"`")
-		return err
-	case DBDriverPostgres:
-		db, err := sql.Open("pgx", dsn)
-		if err != nil {
-			return fmt.Errorf("failed to open database connection: %w", err)
-		}
-		defer db.Close()
-		_, err = db.ExecContext(ctx, `CREATE DATABASE "`+dbname+`"`)
-		// 42P04 duplicate_database means another instance created it first.
-		var pgErr *pgconn.PgError
-		if err != nil && stderrors.As(err, &pgErr) && pgErr.Code == "42P04" {
-			return nil
-		}
-		return err
-	default:
-		return fmt.Errorf("empty or unsupported database driver: [%s]", driver)
-	}
 }
 
 // Schema implements store.Store.
@@ -277,9 +155,8 @@ func (s *Storage) runTransaction(ctx context.Context, options *sql.TxOptions, fn
 	return tx.Commit()
 }
 
-// transactionOptions maps a portable isolation level onto the driver level. An
-// empty level keeps the backend default, which is READ COMMITTED on PostgreSQL
-// and REPEATABLE READ on MySQL.
+// TransactionLevel maps a portable isolation level onto the driver level. An
+// empty level keeps the database default.
 func TransactionLevel(level store.IsolationLevel) (*sql.TxOptions, error) {
 	switch level {
 	case store.IsolationDefault:
@@ -382,7 +259,7 @@ func (s *Storage) get(ctx context.Context, into store.Object, id string, opts st
 	if err != nil {
 		return err
 	}
-	statement := "SELECT " + columns + " FROM " + s.core.dialect.Quote(resource) + where + " LIMIT 1"
+	statement := "SELECT " + columns + " FROM " + s.core.dialect.Quote(resource) + where + s.core.dialect.Window(q.Bind(1), "")
 	rows, err := s.core.exec.QueryContext(ctx, statement, q.args...)
 	if err != nil {
 		return s.core.dialect.MapError(err, resource, id)
@@ -715,8 +592,7 @@ func (s *Storage) Count(ctx context.Context, obj store.Object, options ...store.
 	return int(total), nil
 }
 
-// List implements store.Store. Cursor pagination needs a resumable token that
-// this adapter does not produce, so it is rejected rather than degraded.
+// List implements store.Store with offset-based continuation and one-row lookahead.
 func (s *Storage) List(ctx context.Context, list store.ObjectList, options ...store.ListOption) error {
 	opts := store.ApplyListOptions(options)
 	if opts.IncludeSubScopes {

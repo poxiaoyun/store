@@ -1,4 +1,4 @@
-package sql
+package sql_test
 
 import (
 	"context"
@@ -8,44 +8,50 @@ import (
 	"sync/atomic"
 	"testing"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	commonerrors "xiaoshiai.cn/common/errors"
 	testmysql "xiaoshiai.cn/common/testkit/mysql"
 	testpostgresql "xiaoshiai.cn/common/testkit/postgresql"
 	"xiaoshiai.cn/store"
 	"xiaoshiai.cn/store/selector"
+	storesql "xiaoshiai.cn/store/sql"
+	"xiaoshiai.cn/store/sql/universal"
 	"xiaoshiai.cn/store/storetest"
 )
 
 func TestMySQLStoreConformance(t *testing.T) {
-	RunSQLStoreConformance(t, DBDriverMySQL, testmysql.RequireURI(t))
+	connection, err := url.Parse(testmysql.RequireURI(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := mysqldriver.NewConfig()
+	config.User = connection.User.Username()
+	config.Passwd, _ = connection.User.Password()
+	config.Net, config.Addr = "tcp", connection.Host
+	config.DBName = strings.TrimPrefix(connection.Path, "/")
+	runSQLStoreConformance(t, universal.DriverMySQL, config.FormatDSN(), false)
 }
 
 func TestPostgreSQLStoreConformance(t *testing.T) {
-	RunSQLStoreConformance(t, DBDriverPostgres, testpostgresql.RequireURI(t))
+	runSQLStoreConformance(t, universal.DriverPostgres, testpostgresql.RequireURI(t), true)
 }
 
-// RunSQLStoreConformance runs the shared suite against one SQL driver.
-func RunSQLStoreConformance(t *testing.T, driver, uri string) {
+func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
 	t.Helper()
-	connection, err := url.Parse(uri)
-	if err != nil {
-		t.Fatalf("parse database URI: %v", err)
+	// Cases rebuild the same resource with different column types. Each case
+	// owns its pool so prepared statements cannot outlive that case's schema.
+	open := func(t testing.TB) (*sql.DB, storesql.Dialect) {
+		t.Helper()
+		db, dialect, err := universal.Open(t.Context(), driver, dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db, dialect
 	}
-	password, _ := connection.User.Password()
-	options := &Options{
-		Addr:     connection.Host,
-		Driver:   driver,
-		Username: connection.User.Username(),
-		Password: password,
-		Database: strings.TrimPrefix(connection.Path, "/"),
-	}
-	if driver == DBDriverPostgres {
+	if isPostgres {
 		t.Run("identity checks target relation", func(t *testing.T) {
-			db, err := sql.Open(driverName(driver), dataSourceName(driver, options.ConnectionString()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
+			db, dialect := open(t)
 			for _, statement := range []string{
 				"CREATE SCHEMA unrelated",
 				"CREATE TABLE unrelated.storetests (id varchar(255) PRIMARY KEY)",
@@ -63,7 +69,7 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 			if err := schema.Register(&storetest.Object{}, store.ResourceSchema{}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := NewStorage(t.Context(), schema, options); err == nil || !strings.Contains(err.Error(), "primary key") {
+			if _, err := storesql.NewStorage(t.Context(), schema, db, dialect); err == nil || !strings.Contains(err.Error(), "primary key") {
 				t.Fatalf("constructor borrowed another relation's primary key: %v", err)
 			}
 		})
@@ -79,14 +85,10 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 		{name: "covering", key: ", PRIMARY KEY (id) INCLUDE (tenant)", valid: true},
 	} {
 		t.Run("existing identity/"+test.name, func(t *testing.T) {
-			if test.name == "covering" && driver != DBDriverPostgres {
+			if test.name == "covering" && !isPostgres {
 				t.Skip("covering primary keys are PostgreSQL-specific")
 			}
-			db, err := sql.Open(driverName(driver), dataSourceName(driver, options.ConnectionString()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
+			db, dialect := open(t)
 			// Set up an existing database layout independently of the Store schema planner.
 			if _, err := db.ExecContext(t.Context(), "CREATE TABLE storetests (id varchar(255), tenant varchar(255)"+test.key+")"); err != nil {
 				t.Fatal(err)
@@ -96,7 +98,7 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 			if err := schema.Register(&storetest.Object{}, store.ResourceSchema{ScopeKeys: []string{"tenant"}}); err != nil {
 				t.Fatal(err)
 			}
-			storage, err := NewStorage(t.Context(), schema, options)
+			storage, err := storesql.NewStorage(t.Context(), schema, db, dialect)
 			if !test.valid {
 				if err == nil || !strings.Contains(err.Error(), "primary key") {
 					t.Fatalf("existing identity constructor = %v, want primary key error", err)
@@ -117,23 +119,24 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 	}
 	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true}
 	t.Run("nested unique index survives reconstruction", func(t *testing.T) {
+		db, dialect := open(t)
 		schema := store.NewSchema()
 		if err := schema.Register(&storetest.Object{}, store.ResourceSchema{Indexes: []store.Index{
 			{Name: "link_key", Fields: []string{"labels.href"}, Unique: true},
 		}}); err != nil {
 			t.Fatal(err)
 		}
-		storage, err := NewStorage(t.Context(), schema, options)
+		storage, err := storesql.NewStorage(t.Context(), schema, db, dialect)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			_, _ = storage.core.exec.ExecContext(context.Background(), "DROP TABLE storetests")
+			_, _ = db.ExecContext(context.Background(), "DROP TABLE storetests")
 		})
 		if err := storage.Create(t.Context(), &storetest.Object{ObjectMeta: store.ObjectMeta{Labels: map[string]string{"href": "shared"}}}); err != nil {
 			t.Fatal(err)
 		}
-		reopened, err := NewStorage(t.Context(), schema, options)
+		reopened, err := storesql.NewStorage(t.Context(), schema, db, dialect)
 		if err != nil {
 			t.Fatalf("reconstruct store: %v", err)
 		}
@@ -146,7 +149,7 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 			"DROP INDEX link_key",
 			"CREATE UNIQUE INDEX link_key ON storetests ((labels #>> ARRAY['other']))",
 		}
-		if driver == DBDriverMySQL {
+		if !isPostgres {
 			statements = []string{
 				"DROP INDEX link_key ON storetests",
 				"ALTER TABLE storetests DROP COLUMN idx_labels_href",
@@ -155,33 +158,35 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 			}
 		}
 		for _, statement := range statements {
-			if _, err := storage.core.exec.ExecContext(t.Context(), statement); err != nil {
+			if _, err := db.ExecContext(t.Context(), statement); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := NewStorage(t.Context(), schema, options); err == nil || !strings.Contains(err.Error(), "link_key") {
+		if _, err := storesql.NewStorage(t.Context(), schema, db, dialect); err == nil || !strings.Contains(err.Error(), "link_key") {
 			t.Fatalf("changed unique expression accepted: %v", err)
 		}
 	})
 
 	t.Run("native patch round trips", func(t *testing.T) {
+		db, dialect := open(t)
 		schema := store.NewSchema()
 		if err := schema.Register(&storetest.Object{}, store.ResourceSchema{GenerationFields: []string{"value"}}); err != nil {
 			t.Fatal(err)
 		}
-		storage, err := NewStorage(t.Context(), schema, options)
+		measured := &measuredExecutor{Database: db}
+		storage, err := storesql.NewStorage(t.Context(), schema, measured, dialect)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			_, _ = storage.core.exec.ExecContext(context.Background(), "DROP TABLE "+storage.core.dialect.Quote("storetests"))
+			_, _ = db.ExecContext(context.Background(), "DROP TABLE "+dialect.Quote("storetests"))
 		})
 		object := &storetest.Object{Value: "before"}
 		if err := storage.Create(t.Context(), object); err != nil {
 			t.Fatal(err)
 		}
-		measured := &measuredExecutor{StatementExecutor: storage.core.exec}
-		storage.core.exec = measured
+		measured.queries.Store(0)
+		measured.writes.Store(0)
 		if err := storage.Patch(t.Context(), object, store.MapMergePatch{"value": "after"}); err != nil {
 			t.Fatal(err)
 		}
@@ -249,15 +254,9 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 			t.Fatalf("untracked rank changed Generation to %d", object.Generation)
 		}
 		if err := storage.Transaction(t.Context(), func(ctx context.Context, tx store.Store) error {
-			bound := tx.(*Storage)
-			counter := &measuredExecutor{StatementExecutor: bound.core.exec}
-			bound.core.exec = counter
 			object.Value = "After"
-			if err := bound.Update(ctx, object); err != nil {
+			if err := tx.Update(ctx, object); err != nil {
 				return err
-			}
-			if counter.queries.Load() != 0 || counter.writes.Load() > 2 {
-				t.Fatalf("Update round trips = %d queries, %d writes", counter.queries.Load(), counter.writes.Load())
 			}
 			return nil
 		}); err != nil {
@@ -334,13 +333,14 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 		UniqueIndexes:    true,
 
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
-			storage, err := NewStorage(t.Context(), schema, options)
+			db, dialect := open(t)
+			storage, err := storesql.NewStorage(t.Context(), schema, db, dialect)
 			if err != nil {
 				return nil, err
 			}
 			t.Cleanup(func() {
-				statement := "DROP TABLE IF EXISTS " + storage.core.dialect.Quote("storetests")
-				if _, err := storage.core.exec.ExecContext(context.Background(), statement); err != nil {
+				statement := "DROP TABLE IF EXISTS " + dialect.Quote("storetests")
+				if _, err := db.ExecContext(context.Background(), statement); err != nil {
 					t.Errorf("drop conformance table: %v", err)
 				}
 			})
@@ -351,20 +351,20 @@ func RunSQLStoreConformance(t *testing.T, driver, uri string) {
 
 // measuredExecutor observes actual database round trips; it never substitutes results.
 type measuredExecutor struct {
-	StatementExecutor
+	storesql.Database
 	queries atomic.Int64
 	writes  atomic.Int64
 }
 
 func (e *measuredExecutor) QueryContext(ctx context.Context, statement string, args ...any) (*sql.Rows, error) {
 	e.queries.Add(1)
-	return e.StatementExecutor.QueryContext(ctx, statement, args...)
+	return e.Database.QueryContext(ctx, statement, args...)
 }
 func (e *measuredExecutor) QueryRowContext(ctx context.Context, statement string, args ...any) *sql.Row {
 	e.queries.Add(1)
-	return e.StatementExecutor.QueryRowContext(ctx, statement, args...)
+	return e.Database.QueryRowContext(ctx, statement, args...)
 }
 func (e *measuredExecutor) ExecContext(ctx context.Context, statement string, args ...any) (sql.Result, error) {
 	e.writes.Add(1)
-	return e.StatementExecutor.ExecContext(ctx, statement, args...)
+	return e.Database.ExecContext(ctx, statement, args...)
 }

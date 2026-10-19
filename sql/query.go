@@ -18,6 +18,12 @@ type QueryState struct {
 	args    []any
 }
 
+// NewQueryState starts an independent statement with no bound values.
+func NewQueryState(dialect Dialect) *QueryState {
+	return &QueryState{dialect: dialect}
+}
+
+// Bind appends a value and returns its dialect placeholder.
 func (q *QueryState) Bind(value any) string {
 	q.args = append(q.args, value)
 	return q.dialect.Placeholder(len(q.args))

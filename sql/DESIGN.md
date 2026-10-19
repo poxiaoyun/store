@@ -1,8 +1,18 @@
 # SQL Store 设计
 
-`store/sql` 通过 `database/sql`、MySQL 与 PostgreSQL 驱动实现
-[Store 公共契约](../DESIGN.md)。表布局、SQL 语句、驱动错误与方言差异由本模块拥有，
-不引入 ORM。SQL 的执行方式不能改变公共的身份、版本、查询或删除语义。
+`store/sql` 通过 `database/sql` 的执行接口与注入的 `Dialect` 实现
+[Store 公共契约](../DESIGN.md)。核心拥有资源映射、语句组合、Schema 协调与事务生命周期，
+不导入具体驱动，不根据驱动名称选择行为，不引入 ORM。
+
+`Dialect` 拥有标识符与参数语法、列类型、JSON 操作、Schema introspection、索引及驱动
+错误映射。MySQL 与 PostgreSQL 实现分别属于 `sql/mysql`、`sql/postgres`；它们依赖 SQL
+核心定义的接口，核心不依赖这些实现。新方言通过实现接口接入，无需中央注册表或核心分支。
+可选的 `sql/universal` 工厂按 driver 配置选择内置方言及连接入口；其依赖指向具体
+方言子包，不被核心导入。新增外部方言可以直接注入，不必经过内置工厂。
+
+调用方将数据库连接与方言交给 `NewStorage`，负责连接池配置、关闭及数据库生命周期。
+各方言子包可提供连接与建库入口；核心仅维护已连接数据库内的资源表。构造失败不关闭
+调用方传入的连接。SQL 的执行方式不能改变公共的身份、版本、查询或删除语义。
 
 ## 表布局与 Scope
 

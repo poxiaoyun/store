@@ -2,7 +2,6 @@ package sql
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -40,8 +39,6 @@ type Dialect interface {
 	// FinalizersEmpty tests whether the persisted finalizer array is empty.
 	FinalizersEmpty(column string) string
 
-	// Name reports the driver name this dialect serves.
-	Name() string
 	// Quote renders one identifier.
 	Quote(ident string) string
 	// Placeholder renders the bind marker of the index-th argument (one-based).
@@ -83,27 +80,17 @@ type Dialect interface {
 	IsRetryableConflict(err error) bool
 }
 
-func NewDialect(driver string) (Dialect, error) {
-	switch driver {
-	case DBDriverMySQL:
-		return MySQLDialect{}, nil
-	case DBDriverPostgres:
-		return PostgresDialect{}, nil
-	default:
-		return nil, fmt.Errorf("empty or unsupported database driver: [%s]", driver)
-	}
-}
-
-// jsonPath splits a nested field path. A field without a dot is a plain column.
+// JSONPath splits a nested field path. A field without a dot is a plain column.
 func JSONPath(field string) []string {
 	return strings.Split(field, ".")
 }
 
+// IsNestedField reports whether a field addresses a nested JSON path.
 func IsNestedField(field string) bool {
 	return strings.Contains(field, ".")
 }
 
-// derefType unwraps every pointer layer, so pointer fields map like their value
+// DerefType unwraps every pointer layer, so pointer fields map like their value
 // type and stay nullable through the column definition.
 func DerefType(t reflect.Type) reflect.Type {
 	for t.Kind() == reflect.Pointer {
@@ -117,19 +104,19 @@ var (
 	metaTimeType = reflect.TypeFor[meta.Time]()
 )
 
-// isTimeType reports whether t holds a timestamp rather than a JSON document.
+// IsTimeType reports whether t holds a timestamp rather than a JSON document.
 func IsTimeType(t reflect.Type) bool {
 	return t == timeType || t == metaTimeType
 }
 
-// canonicalTime renders a timestamp in the same textual form nested JSON
+// CanonicalTime renders a timestamp in the same textual form nested JSON
 // timestamps use, so nested comparisons stay lexicographically ordered.
 func CanonicalTime(value time.Time) string {
 	return value.UTC().
 		Format(time.RFC3339)
 }
 
-// textArg renders a requirement value for comparison against a nested JSON
+// TextArg renders a requirement value for comparison against a nested JSON
 // path. Nested values are compared as their JSON text, so timestamps must use
 // the canonical form.
 func TextArg(value any) any {
@@ -153,6 +140,7 @@ func TextArg(value any) any {
 	}
 }
 
+// TextArgs renders requirement values for nested JSON comparisons.
 func TextArgs(values []any) []any {
 	result := make([]any, len(values))
 	for i, value := range values {
@@ -161,17 +149,8 @@ func TextArgs(values []any) []any {
 	return result
 }
 
-// quotedLiteral renders one SQL string literal with its quotes doubled, so a
+// QuoteLiteral renders one SQL string literal with its quotes doubled, so a
 // label key that contains a quote cannot leave the literal.
-func quotedLiteral(value string) string {
+func QuoteLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
-
-// GeneratedColumnName renders the name of the column that materializes a
-// nested index path.
-func GeneratedColumnName(table string, path []string) string {
-	name := "idx_" + strings.Join(path, "_")
-	return strings.ReplaceAll(name, ".", "_")
-}
-
-// ---------------------------------------------------------------------------

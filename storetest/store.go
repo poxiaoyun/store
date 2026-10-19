@@ -137,7 +137,7 @@ func Run(t *testing.T, fixture Fixture) {
 				condition := commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &version})
 				patch := commonstore.MapMergePatch{"value": "changed", "status": map[string]any{"phase": "changed"}}
 				merge := commonstore.MapMergePatch{"resourceVersion": version, "value": "changed", "status": map[string]any{"phase": "changed"}}
-				jsonPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(fmt.Sprintf(`[{"op":"test","path":"/resourceVersion","value":%d},{"op":"replace","path":"/value","value":"changed"}]`, version)))
+				jsonPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, fmt.Appendf(nil, `[{"op":"test","path":"/resourceVersion","value":%d},{"op":"replace","path":"/value","value":"changed"}]`, version))
 				var err error
 				switch operation {
 				case "update":
@@ -187,7 +187,6 @@ func Run(t *testing.T, fixture Fixture) {
 		if got := scoped.Capabilities(); !reflect.DeepEqual(got, fixture.Capabilities) {
 			t.Fatalf("scoped Capabilities() = %#v, want %#v", got, fixture.Capabilities)
 		}
-
 	})
 	t.Run("schema is an independent scope-stable snapshot", func(t *testing.T) {
 		storage := NewStore(t, fixture)
@@ -362,7 +361,6 @@ func Run(t *testing.T, fixture Fixture) {
 				if !reflect.DeepEqual(ids, test.wantIDs) {
 					t.Fatalf("List() IDs = %v, want %v", ids, test.wantIDs)
 				}
-
 			})
 		}
 
@@ -709,13 +707,15 @@ func Run(t *testing.T, fixture Fixture) {
 				t.Fatalf("stale ResourceVersion Delete() error = %v, want Conflict", err)
 			}
 		}
-		if err := storage.Delete(t.Context(), object,
+		if err := storage.Delete(
+			t.Context(), object,
 			commonstore.WithUID("stale"),
 			commonstore.WithLabelRequirements(selector.RequirementEqual("team", "red")),
 		); !commonerrors.IsConflict(err) {
 			t.Fatalf("precondition ordering Delete() error = %v, want Conflict", err)
 		}
-		if err := storage.Delete(t.Context(), object,
+		if err := storage.Delete(
+			t.Context(), object,
 			commonstore.WithUID(object.UID),
 			commonstore.WithLabelRequirements(selector.RequirementEqual("team", "red")),
 		); !commonerrors.IsConflict(err) {
@@ -1336,7 +1336,8 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		// The conformance schema declares value unique, so the batch writes a
 		// non-unique field and selects its targets by value.
-		if err := storage.PatchBatch(t.Context(), &commonstore.List[Object]{},
+		if err := storage.PatchBatch(
+			t.Context(), &commonstore.List[Object]{},
 			commonstore.MapMergePatchBacth{"rank": 5},
 			commonstore.WithFieldRequirements(selector.NewRequirement("value", selector.In, "b", "c")),
 		); err != nil {
@@ -1354,7 +1355,8 @@ func Run(t *testing.T, fixture Fixture) {
 		if !reflect.DeepEqual(ranks, want) {
 			t.Fatalf("patched ranks = %#v, want %#v", ranks, want)
 		}
-		if err := storage.DeleteBatch(t.Context(), &commonstore.List[Object]{},
+		if err := storage.DeleteBatch(
+			t.Context(), &commonstore.List[Object]{},
 			commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.GreaterThan, 1)),
 		); err != nil {
 			t.Fatalf("DeleteBatch() error = %v", err)
@@ -1997,7 +1999,6 @@ func RunQueries(t *testing.T, fixture Fixture, storage commonstore.Store) {
 			if !reflect.DeepEqual(ids, test.wantIDs) {
 				t.Fatalf("List() IDs = %v, want %v", ids, test.wantIDs)
 			}
-
 		})
 	}
 	if fixture.FieldSelector {

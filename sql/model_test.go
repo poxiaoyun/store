@@ -1,7 +1,6 @@
-package sql
+package sql_test
 
 import (
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"reflect"
@@ -12,10 +11,12 @@ import (
 	"xiaoshiai.cn/common/meta"
 	testpostgresql "xiaoshiai.cn/common/testkit/postgresql"
 	"xiaoshiai.cn/store"
+	storesql "xiaoshiai.cn/store/sql"
+	"xiaoshiai.cn/store/sql/postgres"
 )
 
 func TestScanAllReturnsRowStreamError(t *testing.T) {
-	db, err := sql.Open("pgx", testpostgresql.RequireURI(t))
+	db, err := postgres.Open(t.Context(), testpostgresql.RequireURI(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +31,7 @@ func TestScanAllReturnsRowStreamError(t *testing.T) {
 	var result []struct {
 		Value int `json:"value"`
 	}
-	codec := NewModelCodec()
+	codec := storesql.NewModelCodec()
 	err = codec.ScanAll(rows, &result)
 	var databaseError *pgconn.PgError
 	if !errors.As(err, &databaseError) || databaseError.Code != "22012" {
@@ -49,7 +50,7 @@ type timestampObject struct {
 func (*timestampObject) ResourceName() string { return "timestampobjects" }
 
 func TestModelFieldsFollowDeclarationOrder(t *testing.T) {
-	codec := NewModelCodec()
+	codec := storesql.NewModelCodec()
 	fields, err := codec.ModelFields(&timestampObject{})
 	if err != nil {
 		t.Fatal(err)
@@ -70,14 +71,14 @@ func TestModelFieldsFollowDeclarationOrder(t *testing.T) {
 }
 
 func TestModelFieldsRejectNonStructModel(t *testing.T) {
-	codec := NewModelCodec()
+	codec := storesql.NewModelCodec()
 	if _, err := codec.ModelFields("not-a-model"); err == nil {
 		t.Fatal("ModelFields(string) returned no error")
 	}
 }
 
 func TestModelFieldsRejectDuplicateRepresentationName(t *testing.T) {
-	codec := NewModelCodec()
+	codec := storesql.NewModelCodec()
 	if _, err := codec.ModelFields(&duplicateNameObject{}); err == nil {
 		t.Fatal("ModelFields() accepted a duplicate field name")
 	}
@@ -100,9 +101,9 @@ func TestToDriverValueWritesTimestampsAsTime(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := ToDriverValue(reflect.ValueOf(test.value))
+			got := storesql.ToDriverValue(reflect.ValueOf(test.value))
 			if !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("ToDriverValue(%T) = %#v, want %#v", test.value, got, test.want)
+				t.Fatalf("storesql.ToDriverValue(%T) = %#v, want %#v", test.value, got, test.want)
 			}
 		})
 	}
@@ -110,17 +111,17 @@ func TestToDriverValueWritesTimestampsAsTime(t *testing.T) {
 
 func TestToDriverValueWritesNilTimestampAsNull(t *testing.T) {
 	var missing *meta.Time
-	if got := ToDriverValue(reflect.ValueOf(missing)); got != nil {
-		t.Fatalf("ToDriverValue(nil *meta.Time) = %#v, want nil", got)
+	if got := storesql.ToDriverValue(reflect.ValueOf(missing)); got != nil {
+		t.Fatalf("storesql.ToDriverValue(nil *meta.Time) = %#v, want nil", got)
 	}
 }
 
 func TestToDriverValueKeepsDocumentsForJSONColumns(t *testing.T) {
 	value := map[string]string{"team": "blue"}
-	got := ToDriverValue(reflect.ValueOf(value))
+	got := storesql.ToDriverValue(reflect.ValueOf(value))
 	valuer, ok := got.(driver.Valuer)
 	if !ok {
-		t.Fatalf("ToDriverValue(map) = %T, want driver.Valuer", got)
+		t.Fatalf("storesql.ToDriverValue(map) = %T, want driver.Valuer", got)
 	}
 	encoded, err := valuer.Value()
 	if err != nil {

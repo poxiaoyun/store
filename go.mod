@@ -13,6 +13,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.6.14
 	go.mongodb.org/mongo-driver v1.17.9
 	golang.org/x/sync v0.22.0
+	golang.org/x/time v0.12.0
 	google.golang.org/grpc v1.83.0
 	k8s.io/apimachinery v0.35.2
 	k8s.io/apiserver v0.35.2
@@ -113,7 +114,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
