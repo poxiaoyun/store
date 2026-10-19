@@ -135,3 +135,38 @@ requirements, err = selector.ParseRequirements(expression)
 `!(...)`、`all()` 和 `none()`。包含分隔符的字符串自动加引号。协议 operand 按
 selector 语义解析成字符串，由 Requirement 求值层完成布尔值、数值和时间比较；
 `null` 单独表示 nil。Requirement 值支持 nil、字符串、布尔值、整数、有限浮点数和时间。
+
+## 序号分配
+
+`store.Sequence` 按调用方提供的稳定 namespace 独立分配序号。相同 namespace 的序号唯一递增，允许
+空洞；不同 namespace 分别计数。namespace 是不透明字符串，`/` 不表示层级，也不隐式
+关联 `Store.Scope`。业务编号与对象 ID、ResourceVersion 独立，不通过 CRUD 分配。
+
+内存序列用 `inmemory.NewSequence()` 构造，数据只属于该实例，进程退出后丢失。
+MongoDB 序列用 `mongo.NewSequence(database.Collection("sequences"))` 构造；使用同一
+collection 的实例共享序列，调用方负责数据库连接生命周期。
+
+```go
+var numbers store.Sequence = inmemory.NewSequence()
+number, err := numbers.Next(ctx, "issues/repository-uid")
+```
+
+## 队列
+
+`store.Queue` 提供独立的 `Enqueue` 与 `Consume` 接口，分别接收 `store.EnqueueOptions`
+和 `store.ConsumeOptions`，消费函数类型为 `store.QueueHandleFunc`。
+
+内存实现使用 `inmemory.NewQueue()`；MongoDB 实现使用
+`mongo.NewQueue(database.Collection("queue"), &mongo.QueueOptions{})`，调用方管理数据库
+连接生命周期。`CheckInterval` 控制 MongoDB 队列的轮询间隔，零值使用一分钟。
+
+相同 ID 的待消费消息会替换内容及延迟，处理中和已完成的 ID 重复入队直接忽略。
+`After` 是最早执行延迟；`MaxWorkers` 限制一次 `Consume` 的并发，零值为 1。
+消费函数返回错误时，消息保留供下次消费，本次 `Consume` 取消其他 worker、等待退出后返回错误。
+消费函数需要响应 Context 取消；返回 nil 的消息仍会完成确认，失败消息保留原始内容。
+成功完成的 ID 持续占用去重记录，直到对应内存实例或 MongoDB collection 被销毁。
+
+MongoDB 消费需要 replica set 或 sharded cluster 提供 change stream。通知用于及时唤醒，
+轮询负责延迟消息和补漏；积压消息连续领取，不在每条消息间等待。连接的超时配置也适用于
+退出时的确认或释放操作。进程崩溃或数据库确认失败可能留下处理中消息，Queue 不自动回收；
+需要执行租约和自动重试时使用 task。

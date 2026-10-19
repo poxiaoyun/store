@@ -52,6 +52,11 @@ Fixture.ResourceWideIDs 声明资源内跨 Scope 的 ID 唯一性。SQL 开启�
 支持 Watch 的实现还须验证移除最后一个 finalizer 时直接产生删除事件，不能先发布一个
 已清空 finalizer 但尚未物理删除的中间对象。
 
+队列实现通过 `storetest.RunQueue` 复用入队去重、延迟、并发、失败保留与取消释放契约。
+`go test ./inmemory -run TestQueue` 运行内存实现；
+`MONGODB_URI=... go test ./mongo -run TestQueue` 验证真实 MongoDB，包括空闲通知、
+跨实例原子领取和领取期间取消。MongoDB 门控跳过规则与 Store 套件相同。
+
 ## 已知环境限制
 
 - MongoDB 8.0 在 Linux 内核 6.19 及更新版本上拒绝启动（SERVER-121912）；该环境需
