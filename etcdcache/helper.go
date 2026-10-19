@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	kjson "sigs.k8s.io/json"
 	"xiaoshiai.cn/common/meta"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 func IndexerFromFields(fields []string) cache.Indexers {
@@ -133,14 +133,18 @@ func compareSortValues(a, b any) int {
 		case int64:
 			return store.CompareField(av, bv)
 		case float64:
-			return big.NewRat(av, 1).Cmp(new(big.Rat).SetFloat64(bv))
+			return big.NewRat(av, 1).
+				Cmp(new(big.Rat).
+					SetFloat64(bv))
 		}
 	case float64:
 		switch bv := b.(type) {
 		case float64:
 			return store.CompareField(av, bv)
 		case int64:
-			return new(big.Rat).SetFloat64(av).Cmp(big.NewRat(bv, 1))
+			return new(big.Rat).
+				SetFloat64(av).
+				Cmp(big.NewRat(bv, 1))
 		}
 	}
 	return strings.Compare(store.AnyToString(a), store.AnyToString(b))

@@ -25,7 +25,7 @@ type Object struct {
 	Value                  string       `json:"value,omitempty"`
 	Rank                   int          `json:"rank,omitempty"`
 	Tenant                 string       `json:"tenant,omitempty"`
-	Status                 ObjectStatus `json:"status,omitempty"`
+	Status                 ObjectStatus `json:"status"`
 }
 
 // ResourceName implements commonstore.ResourcedObject.
@@ -46,19 +46,148 @@ type ObjectStatus struct {
 type Factory func(t testing.TB, schema *commonstore.Schema) (commonstore.Store, error)
 
 // Fixture connects one Store implementation to the conformance suite.
+// Capabilities and request support are independent expectations, not values
+// inferred from the tested Store or its responses. New isolates each subtest,
+// including persisted data.
 type Fixture struct {
+	// ResourceWideIDs requires ID uniqueness across every scope of a resource.
+	ResourceWideIDs bool
+	// MergePatchOnly declares that JSON Patch must be rejected without effects.
+	MergePatchOnly bool
+	// BatchFinalizerRemovalOnly excludes assigning nonempty finalizers in a batch.
+	BatchFinalizerRemovalOnly bool
+
 	New          Factory
 	Capabilities commonstore.Capabilities
+
+	// These options select supported requests in the suite. Unsupported requests
+	// must be rejected; they are not skipped. Index options configure the schema.
+	LabelSelector    bool
+	FieldSelector    bool
+	Search           bool
+	Sort             bool
+	Continue         bool
+	Projection       bool
+	SubScopes        bool
+	DeleteBatch      bool
+	PatchBatch       bool
+	Transaction      bool
+	TTL              bool
+	DryRun           bool
+	SecondaryIndexes bool
+	UniqueIndexes    bool
 }
 
 // Run executes the shared Store contract against fixture.
 func Run(t *testing.T, fixture Fixture) {
 	t.Helper()
+	runIdentity(t, fixture)
+	update := func(ctx context.Context, s commonstore.Store, object commonstore.Object) error {
+		if !fixture.Capabilities.OptimisticLock {
+			object.SetResourceVersion(0)
+		}
+		return s.Update(ctx, object)
+	}
+	updateStatus := func(ctx context.Context, s commonstore.Store, object commonstore.Object) error {
+		if !fixture.Capabilities.OptimisticLock {
+			object.SetResourceVersion(0)
+		}
+		return s.Status().
+			Update(ctx, object)
+	}
+	runWriteOptions(t, fixture)
+	runFinalizers(t, fixture)
+	runMutationConditions(t, fixture)
+	t.Run("generation without declared fields", func(t *testing.T) {
+		schema := commonstore.NewSchema()
+		if err := schema.Register(&Object{}, commonstore.ResourceSchema{}); err != nil {
+			t.Fatal(err)
+		}
+		storage, err := fixture.New(t, schema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object := &Object{Value: "before"}
+		if err := storage.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Patch(t.Context(), object, commonstore.MapMergePatch{"value": "after"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
+		}
+		if object.Value != "after" || object.Generation != 1 {
+			t.Fatalf("untracked change = %#v, want value after, generation 1", object)
+		}
+	})
+	if !fixture.Capabilities.OptimisticLock {
+		for _, operation := range []string{"update", "status update", "patch", "status patch", "merge patch", "status merge patch", "JSON patch", "status JSON patch", "delete"} {
+			t.Run("unsupported version condition/"+operation, func(t *testing.T) {
+				storage := NewStore(t, fixture)
+				object := &Object{Value: "before", Status: ObjectStatus{Phase: "pending"}}
+				if err := storage.Create(t.Context(), object); err != nil {
+					t.Fatal(err)
+				}
+				before := &Object{}
+				if err := storage.Get(t.Context(), object.ID, before); err != nil {
+					t.Fatal(err)
+				}
+				version := before.ResourceVersion
+				condition := commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &version})
+				patch := commonstore.MapMergePatch{"value": "changed", "status": map[string]any{"phase": "changed"}}
+				merge := commonstore.MapMergePatch{"resourceVersion": version, "value": "changed", "status": map[string]any{"phase": "changed"}}
+				jsonPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(fmt.Sprintf(`[{"op":"test","path":"/resourceVersion","value":%d},{"op":"replace","path":"/value","value":"changed"}]`, version)))
+				var err error
+				switch operation {
+				case "update":
+					object.Value = "changed"
+					err = storage.Update(t.Context(), object)
+				case "status update":
+					object.Status.Phase = "changed"
+					err = storage.Status().
+						Update(t.Context(), object)
+				case "patch":
+					err = storage.Patch(t.Context(), object, patch, condition)
+				case "status patch":
+					err = storage.Status().
+						Patch(t.Context(), object, patch, condition)
+				case "merge patch":
+					err = storage.Patch(t.Context(), object, merge)
+				case "status merge patch":
+					err = storage.Status().
+						Patch(t.Context(), object, merge)
+				case "JSON patch":
+					err = storage.Patch(t.Context(), object, jsonPatch)
+				case "status JSON patch":
+					err = storage.Status().
+						Patch(t.Context(), object, jsonPatch)
+				case "delete":
+					err = storage.Delete(t.Context(), object, commonstore.WithResourceVersion(version))
+				}
+				if !commonerrors.IsUnsupported(err) {
+					t.Errorf("conditional write error = %v, want Unsupported", err)
+				}
+				got := &Object{}
+				if err := storage.Get(t.Context(), object.ID, got); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, before) {
+					t.Fatalf("unsupported condition changed object: %#v", got)
+				}
+			})
+		}
+	}
 	t.Run("capabilities", func(t *testing.T) {
 		storage := NewStore(t, fixture)
 		if got := storage.Capabilities(); !reflect.DeepEqual(got, fixture.Capabilities) {
 			t.Fatalf("Capabilities() = %#v, want %#v", got, fixture.Capabilities)
 		}
+		scoped := storage.Scope(commonstore.Scope{Resource: "tenants", Name: "capabilities"})
+		if got := scoped.Capabilities(); !reflect.DeepEqual(got, fixture.Capabilities) {
+			t.Fatalf("scoped Capabilities() = %#v, want %#v", got, fixture.Capabilities)
+		}
+
 	})
 	t.Run("schema is an independent scope-stable snapshot", func(t *testing.T) {
 		storage := NewStore(t, fixture)
@@ -110,19 +239,25 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("Create() error = %v", err)
 		}
 		object.Rank = 8
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("entering Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		AssertWatchEvent(t, NextObjectWatchEvent(t, watcher), commonstore.WatchEventCreate, "transition")
 
 		object.Value = "matching"
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("matching Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		AssertWatchEvent(t, NextObjectWatchEvent(t, watcher), commonstore.WatchEventUpdate, "transition")
 
 		object.Rank = 9
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("leaving Update() error = %v", err)
 		}
 		deleted := NextObjectWatchEvent(t, watcher)
@@ -133,7 +268,7 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 	})
 	t.Run("watch reports comparison selector membership transitions", func(t *testing.T) {
-		if !fixture.Capabilities.Watch || !fixture.Capabilities.FieldSelector {
+		if !fixture.Capabilities.Watch || !fixture.FieldSelector {
 			t.Skip("watch with field selectors is not declared")
 		}
 		storage := NewStore(t, fixture)
@@ -153,8 +288,11 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("Create() error = %v", err)
 		}
 		object.Rank = 8
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("entering Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		created := NextObjectWatchEvent(t, watcher)
 		AssertWatchEvent(t, created, commonstore.WatchEventCreate, "comparison-transition")
@@ -163,8 +301,11 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 
 		object.Rank = 9
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("matching Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		updated := NextObjectWatchEvent(t, watcher)
 		AssertWatchEvent(t, updated, commonstore.WatchEventUpdate, "comparison-transition")
@@ -173,7 +314,7 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 
 		object.Rank = 7
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("leaving Update() error = %v", err)
 		}
 		deleted := NextObjectWatchEvent(t, watcher)
@@ -183,7 +324,7 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 	})
 	t.Run("field comparisons use typed values before pagination", func(t *testing.T) {
-		if !fixture.Capabilities.FieldSelector {
+		if !fixture.FieldSelector {
 			t.Skip("field selectors are not declared")
 		}
 		storage := NewStore(t, fixture)
@@ -221,9 +362,7 @@ func Run(t *testing.T, fixture Fixture) {
 				if !reflect.DeepEqual(ids, test.wantIDs) {
 					t.Fatalf("List() IDs = %v, want %v", ids, test.wantIDs)
 				}
-				if list.Total == nil || *list.Total != len(test.wantIDs) {
-					t.Fatalf("List() total = %v, want %d", list.Total, len(test.wantIDs))
-				}
+
 			})
 		}
 
@@ -245,9 +384,7 @@ func Run(t *testing.T, fixture Fixture) {
 			if ids := ObjectIDs(list.Items); !reflect.DeepEqual(ids, []string{"high"}) {
 				t.Fatalf("limited List() IDs = %v, want [high]", ids)
 			}
-			if list.Total == nil || *list.Total != 2 {
-				t.Fatalf("limited List() metadata = %#v", list)
-			}
+
 		}
 	})
 	t.Run("watch checkpoint resumes or expires", func(t *testing.T) {
@@ -344,6 +481,9 @@ func Run(t *testing.T, fixture Fixture) {
 	})
 
 	t.Run("patch enforces exact preconditions", func(t *testing.T) {
+		if !fixture.Capabilities.OptimisticLock {
+			t.Skip("conditional writes are checked by the unsupported-version contract")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "conditional-patch"}, Value: "original"}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -353,6 +493,9 @@ func Run(t *testing.T, fixture Fixture) {
 		patch := commonstore.MapMergePatch{"value": "updated"}
 		target := &Object{ObjectMeta: commonstore.ObjectMeta{ID: object.ID}}
 		if err := storage.Patch(t.Context(), target, patch, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &version})); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), target.ID, target); err != nil {
 			t.Fatal(err)
 		}
 		if target.Value != "updated" || target.ResourceVersion <= version {
@@ -371,7 +514,8 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("failed patch persisted: %#v", got)
 		}
 		uid := "other"
-		if err := storage.Status().Patch(t.Context(), got, commonstore.MapMergePatch{"status": map[string]any{"phase": "invalid"}}, commonstore.WithPreconditions(commonstore.Preconditions{UID: &uid})); !commonerrors.IsConflict(err) {
+		if err := storage.Status().
+			Patch(t.Context(), got, commonstore.MapMergePatch{"status": map[string]any{"phase": "invalid"}}, commonstore.WithPreconditions(commonstore.Preconditions{UID: &uid})); !commonerrors.IsConflict(err) {
 			t.Fatalf("wrong identity Status Patch = %v", err)
 		}
 	})
@@ -387,18 +531,23 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatal(err)
 		}
 		object.Value = "updated"
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatal(err)
 		}
 		if err := storage.Get(t.Context(), object.ID, &Object{}, condition); !commonerrors.IsConflict(err) {
 			t.Fatalf("stale Get = %v, want Conflict", err)
 		}
-		if err := storage.Get(t.Context(), object.ID, &Object{}, condition, commonstore.WithFields("value")); !commonerrors.IsConflict(err) {
-			t.Fatalf("projected stale Get = %v, want Conflict", err)
-		}
-		currentVersion := object.ResourceVersion
-		if err := storage.Get(t.Context(), object.ID, &Object{}, commonstore.WithPreconditions(commonstore.Preconditions{UID: &observedUID, ResourceVersion: &currentVersion}), commonstore.WithFields("value")); err != nil {
-			t.Fatalf("projected current Get = %v", err)
+		if fixture.Projection {
+			if err := storage.Get(t.Context(), object.ID, &Object{}, condition, commonstore.WithFields("value")); !commonerrors.IsConflict(err) {
+				t.Fatalf("projected stale Get = %v, want Conflict", err)
+			}
+			if err := storage.Get(t.Context(), object.ID, object); err != nil {
+				t.Fatal(err)
+			}
+			currentVersion := object.ResourceVersion
+			if err := storage.Get(t.Context(), object.ID, &Object{}, commonstore.WithPreconditions(commonstore.Preconditions{UID: &observedUID, ResourceVersion: &currentVersion}), commonstore.WithFields("value")); err != nil {
+				t.Fatalf("projected current Get = %v", err)
+			}
 		}
 		if err := storage.Get(t.Context(), "missing", &Object{}, condition); !commonerrors.IsNotFound(err) {
 			t.Fatalf("missing Get = %v, want NotFound", err)
@@ -464,8 +613,11 @@ func Run(t *testing.T, fixture Fixture) {
 		previousVersion := object.ResourceVersion
 		object.Value = "two"
 		object.Status.Phase = "must-not-change"
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		if object.Value != "two" || object.Status.Phase != "current" {
 			t.Fatalf("Update() = %#v, want value two and preserved status", object)
@@ -479,8 +631,11 @@ func Run(t *testing.T, fixture Fixture) {
 
 		generation := object.Generation
 		object.Labels = map[string]string{"example.com/team": "platform"}
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("metadata Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		if object.Generation != generation {
 			t.Fatalf("metadata Update() Generation = %d, want %d", object.Generation, generation)
@@ -500,8 +655,11 @@ func Run(t *testing.T, fixture Fixture) {
 		object.Value = "must-not-change"
 		object.Labels = map[string]string{"must": "not-change"}
 		object.Status.Phase = "ready"
-		if err := storage.Status().Update(t.Context(), object); err != nil {
+		if err := updateStatus(t.Context(), storage, object); err != nil {
 			t.Fatalf("Status().Update() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		if object.Value != "current" || !reflect.DeepEqual(object.Labels, map[string]string{"team": "blue"}) || object.Status.Phase != "ready" {
 			t.Fatalf("Status().Update() = %#v", object)
@@ -511,6 +669,9 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 	})
 	t.Run("delete honors finalizers", func(t *testing.T) {
+		if !fixture.Capabilities.Finalizers {
+			t.Skip("finalizers unsupported")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{ObjectMeta: commonstore.ObjectMeta{Finalizers: []string{"example.com/cleanup"}}}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -527,7 +688,7 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatal("Delete() did not set DeletionTimestamp")
 		}
 		terminating.Finalizers = nil
-		if err := storage.Update(t.Context(), terminating); err != nil {
+		if err := update(t.Context(), storage, terminating); err != nil {
 			t.Fatalf("clear finalizers Update() error = %v", err)
 		}
 		if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
@@ -543,8 +704,10 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.Delete(t.Context(), object, commonstore.WithUID("stale")); !commonerrors.IsConflict(err) {
 			t.Fatalf("stale UID Delete() error = %v, want Conflict", err)
 		}
-		if err := storage.Delete(t.Context(), object, commonstore.WithResourceVersion(object.ResourceVersion+1)); !commonerrors.IsConflict(err) {
-			t.Fatalf("stale ResourceVersion Delete() error = %v, want Conflict", err)
+		if fixture.Capabilities.OptimisticLock {
+			if err := storage.Delete(t.Context(), object, commonstore.WithResourceVersion(object.ResourceVersion+1)); !commonerrors.IsConflict(err) {
+				t.Fatalf("stale ResourceVersion Delete() error = %v, want Conflict", err)
+			}
 		}
 		if err := storage.Delete(t.Context(), object,
 			commonstore.WithUID("stale"),
@@ -555,13 +718,14 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.Delete(t.Context(), object,
 			commonstore.WithUID(object.UID),
 			commonstore.WithLabelRequirements(selector.RequirementEqual("team", "red")),
-		); !commonerrors.IsNotFound(err) {
-			t.Fatalf("requirement mismatch Delete() error = %v, want NotFound", err)
+		); !commonerrors.IsConflict(err) {
+			t.Fatalf("requirement mismatch Delete() error = %v, want Conflict", err)
 		}
-		if err := storage.Delete(t.Context(), object,
-			commonstore.WithUID(object.UID),
-			commonstore.WithResourceVersion(object.ResourceVersion),
-		); err != nil {
+		deleteOptions := []commonstore.DeleteOption{commonstore.WithUID(object.UID)}
+		if fixture.Capabilities.OptimisticLock {
+			deleteOptions = append(deleteOptions, commonstore.WithResourceVersion(object.ResourceVersion))
+		}
+		if err := storage.Delete(t.Context(), object, deleteOptions...); err != nil {
 			t.Fatalf("conditional Delete() error = %v", err)
 		}
 	})
@@ -577,21 +741,31 @@ func Run(t *testing.T, fixture Fixture) {
 		}); err != nil {
 			t.Fatalf("Patch() error = %v", err)
 		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
+		}
 		if object.Value != "two" || object.Status.Phase != "pending" || object.Generation != 2 {
 			t.Fatalf("Patch() = %#v", object)
 		}
 		generation := object.Generation
-		if err := storage.Status().Patch(t.Context(), object, commonstore.MapMergePatch{
-			"value":  "must-not-change",
-			"status": map[string]any{"phase": "ready"},
-		}); err != nil {
+		if err := storage.Status().
+			Patch(t.Context(), object, commonstore.MapMergePatch{
+				"value":  "must-not-change",
+				"status": map[string]any{"phase": "ready"},
+			}); err != nil {
 			t.Fatalf("Status().Patch() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		if object.Value != "two" || object.Status.Phase != "ready" || object.Generation != generation {
 			t.Fatalf("Status().Patch() = %#v", object)
 		}
 	})
 	t.Run("merge patch rejects stale resource version", func(t *testing.T) {
+		if !fixture.Capabilities.OptimisticLock {
+			t.Skip("conditional writes are checked by the unsupported-version contract")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{Value: "one"}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -599,7 +773,7 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		staleVersion := object.ResourceVersion
 		object.Value = "two"
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("Update() error = %v", err)
 		}
 		err := storage.Patch(t.Context(), object, commonstore.MapMergePatch{
@@ -618,6 +792,9 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 	})
 	t.Run("merge patch accepts current resource version", func(t *testing.T) {
+		if !fixture.Capabilities.OptimisticLock {
+			t.Skip("conditional writes are checked by the unsupported-version contract")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{Value: "one"}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -629,6 +806,9 @@ func Run(t *testing.T, fixture Fixture) {
 			"value":           "two",
 		}); err != nil {
 			t.Fatalf("Patch() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		if object.Value != "two" || object.ResourceVersion <= expectedVersion {
 			t.Fatalf("Patch() result = %#v", object)
@@ -645,11 +825,14 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("CopyObject() error = %v", err)
 		}
 		object.Rank = 2
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("Update() error = %v", err)
 		}
 		if err := storage.Patch(t.Context(), stale, commonstore.MapMergePatch{"value": "two"}); err != nil {
 			t.Fatalf("Patch() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), stale.ID, stale); err != nil {
+			t.Fatal(err)
 		}
 		if stale.Value != "two" || stale.Rank != 2 {
 			t.Fatalf("Patch() result = %#v, want latest rank and patched value", stale)
@@ -692,6 +875,9 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 	})
 	t.Run("JSON patch tests current resource version", func(t *testing.T) {
+		if !fixture.Capabilities.OptimisticLock {
+			t.Skip("conditional writes are checked by the unsupported-version contract")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{Value: "one"}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -701,14 +887,24 @@ func Run(t *testing.T, fixture Fixture) {
             {"op":"test","path":"/resourceVersion","value":%d},
             {"op":"replace","path":"/value","value":"two"}
         ]`, object.ResourceVersion)))
+		if fixture.MergePatchOnly {
+			rejectPatch(t, storage, object, patch)
+			return
+		}
 		if err := storage.Patch(t.Context(), object, patch); err != nil {
 			t.Fatalf("Patch() error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
 		}
 		if object.Value != "two" {
 			t.Fatalf("Patch() value = %q, want two", object.Value)
 		}
 	})
 	t.Run("JSON patch rejects stale resource version test", func(t *testing.T) {
+		if !fixture.Capabilities.OptimisticLock {
+			t.Skip("conditional writes are checked by the unsupported-version contract")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{Value: "one"}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -716,13 +912,17 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		staleVersion := object.ResourceVersion
 		object.Value = "two"
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("Update() error = %v", err)
 		}
 		patch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(fmt.Sprintf(`[
             {"op":"test","path":"/resourceVersion","value":%d},
             {"op":"replace","path":"/value","value":"stale"}
         ]`, staleVersion)))
+		if fixture.MergePatchOnly {
+			rejectPatch(t, storage, object, patch)
+			return
+		}
 		err := storage.Patch(t.Context(), object, patch)
 		if !commonerrors.IsCode(err, http.StatusUnprocessableEntity) {
 			t.Fatalf("stale Patch() error = %v, want 422", err)
@@ -754,6 +954,9 @@ func Run(t *testing.T, fixture Fixture) {
 	})
 
 	t.Run("status patch rejects stale resource version", func(t *testing.T) {
+		if !fixture.Capabilities.OptimisticLock {
+			t.Skip("conditional writes are checked by the unsupported-version contract")
+		}
 		storage := NewStore(t, fixture)
 		object := &Object{Status: ObjectStatus{Phase: "pending"}}
 		if err := storage.Create(t.Context(), object); err != nil {
@@ -761,13 +964,14 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		staleVersion := object.ResourceVersion
 		object.Status.Phase = "ready"
-		if err := storage.Status().Update(t.Context(), object); err != nil {
+		if err := updateStatus(t.Context(), storage, object); err != nil {
 			t.Fatalf("Status().Update() error = %v", err)
 		}
-		err := storage.Status().Patch(t.Context(), object, commonstore.MapMergePatch{
-			"resourceVersion": staleVersion,
-			"status":          map[string]any{"phase": "stale"},
-		})
+		err := storage.Status().
+			Patch(t.Context(), object, commonstore.MapMergePatch{
+				"resourceVersion": staleVersion,
+				"status":          map[string]any{"phase": "stale"},
+			})
 		if !commonerrors.IsConflict(err) {
 			t.Fatalf("stale Status().Patch() error = %v, want Conflict", err)
 		}
@@ -777,6 +981,68 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		if got.Status.Phase != "ready" {
 			t.Fatalf("stale Status().Patch() stored phase = %q, want ready", got.Status.Phase)
+		}
+	})
+	t.Run("no-op writes still enforce conditions", func(t *testing.T) {
+		storage := NewStore(t, fixture)
+		object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "no-op"}, Value: "same"}
+		if err := storage.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+		initialVersion := object.ResourceVersion
+		object.ResourceVersion = 0
+		if err := update(t.Context(), storage, object); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
+		}
+		if object.ResourceVersion < initialVersion || object.Generation != 1 {
+			t.Fatalf("no-op metadata = %#v", object.ObjectMeta)
+		}
+		before := &Object{}
+		if err := storage.Get(t.Context(), object.ID, before); err != nil {
+			t.Fatal(err)
+		}
+		wrongVersion := before.ResourceVersion + 1
+		for _, operation := range []string{"update", "patch", "status update", "status patch", "delete"} {
+			t.Run(operation, func(t *testing.T) {
+				target := &Object{}
+				if err := commonstore.CopyObject(before, target); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				switch operation {
+				case "update":
+					target.ResourceVersion = wrongVersion
+					err = storage.Update(t.Context(), target)
+				case "patch":
+					err = storage.Patch(t.Context(), target, commonstore.MapMergePatch{"value": "same"}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &wrongVersion}))
+				case "status update":
+					target.ResourceVersion = wrongVersion
+					err = storage.Status().
+						Update(t.Context(), target)
+				case "status patch":
+					err = storage.Status().
+						Patch(t.Context(), target, commonstore.MapMergePatch{"status": map[string]any{}}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &wrongVersion}))
+				case "delete":
+					err = storage.Delete(t.Context(), target, commonstore.WithResourceVersion(wrongVersion))
+				}
+				if fixture.Capabilities.OptimisticLock {
+					if !commonerrors.IsConflict(err) {
+						t.Errorf("stale no-op error = %v, want Conflict", err)
+					}
+				} else if !commonerrors.IsUnsupported(err) {
+					t.Errorf("conditional write error = %v, want Unsupported", err)
+				}
+				got := &Object{}
+				if err := storage.Get(t.Context(), before.ID, got); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, before) {
+					t.Fatalf("failed condition changed persisted state: %#v", got)
+				}
+			})
 		}
 	})
 	t.Run("optimistic update", func(t *testing.T) {
@@ -790,7 +1056,7 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("CopyObject() error = %v", err)
 		}
 		object.Value = "two"
-		if err := storage.Update(t.Context(), object); err != nil {
+		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatalf("Update() error = %v", err)
 		}
 		stale.Value = "stale"
@@ -799,8 +1065,8 @@ func Run(t *testing.T, fixture Fixture) {
 			if !commonerrors.IsConflict(err) {
 				t.Fatalf("stale Update() error = %v, want Conflict", err)
 			}
-		} else if err != nil {
-			t.Fatalf("stale Update() error = %v", err)
+		} else if !commonerrors.IsUnsupported(err) {
+			t.Fatalf("stale Update() error = %v, want Unsupported", err)
 		}
 		unconditional := &Object{}
 		if err := storage.Get(t.Context(), object.ID, unconditional); err != nil {
@@ -812,6 +1078,71 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("unconditional Update() error = %v", err)
 		}
 	})
+	for _, operation := range []string{"get", "list", "count", "update", "patch", "delete", "patch batch", "delete batch"} {
+		t.Run("root scope excludes children/"+operation, func(t *testing.T) {
+			if operation == "patch batch" && !fixture.PatchBatch || operation == "delete batch" && !fixture.DeleteBatch {
+				t.Skip("batch operation is not declared")
+			}
+			root := NewStore(t, fixture)
+			child := root.Scope(commonstore.Scope{Resource: "tenants", Name: "child"})
+			obj := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "child-only"}, Value: "protected"}
+			if err := child.Create(t.Context(), obj); err != nil {
+				t.Fatal(err)
+			}
+			before := &Object{}
+			if err := child.Get(t.Context(), obj.ID, before); err != nil {
+				t.Fatal(err)
+			}
+			target := &Object{ObjectMeta: commonstore.ObjectMeta{ID: obj.ID}, Value: "unexpected"}
+			var err error
+			switch operation {
+			case "get":
+				err = root.Get(t.Context(), obj.ID, target)
+			case "update":
+				err = root.Update(t.Context(), target)
+			case "patch":
+				err = root.Patch(t.Context(), target, commonstore.MapMergePatch{"value": "unexpected"})
+			case "delete":
+				err = root.Delete(t.Context(), target)
+			case "list":
+				list := &commonstore.List[Object]{}
+				if err := root.List(t.Context(), list); err != nil {
+					t.Fatal(err)
+				}
+				if len(list.Items) != 0 {
+					t.Errorf("root List returned children: %v", ObjectIDs(list.Items))
+				}
+			case "count":
+				count, err := root.Count(t.Context(), &Object{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if count != 0 {
+					t.Errorf("root Count = %d, want 0", count)
+				}
+			case "patch batch":
+				if err := root.PatchBatch(t.Context(), &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"rank": 9}); err != nil {
+					t.Fatal(err)
+				}
+			case "delete batch":
+				if err := root.DeleteBatch(t.Context(), &commonstore.List[Object]{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if operation == "get" || operation == "update" || operation == "patch" || operation == "delete" {
+				if !commonerrors.IsNotFound(err) {
+					t.Errorf("root operation error = %v, want NotFound", err)
+				}
+			}
+			after := &Object{}
+			if err := child.Get(t.Context(), obj.ID, after); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("root operation modified child: %#v", after)
+			}
+		})
+	}
 	t.Run("scope is exact by default", func(t *testing.T) {
 		storage := NewStore(t, fixture)
 		acme := storage.Scope(commonstore.Scope{Resource: "tenants", Name: "acme"})
@@ -826,7 +1157,7 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := other.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
 			t.Fatalf("sibling-scope Get() error = %v, want NotFound", err)
 		}
-		if fixture.Capabilities.SubScopes {
+		if fixture.SubScopes {
 			child := acme.Scope(commonstore.Scope{Resource: "projects", Name: "one"})
 			childObject := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "child"}}
 			if err := child.Create(t.Context(), childObject); err != nil {
@@ -840,7 +1171,7 @@ func Run(t *testing.T, fixture Fixture) {
 		if len(list.Items) != 1 || list.Items[0].ID != "scoped" {
 			t.Fatalf("exact List() IDs = %v, want [scoped]", ObjectIDs(list.Items))
 		}
-		if fixture.Capabilities.SubScopes {
+		if fixture.SubScopes {
 			list = &commonstore.List[Object]{Resource: "storetests"}
 			if err := acme.List(t.Context(), list, commonstore.WithSubScopes()); err != nil {
 				t.Fatalf("subscope List() error = %v", err)
@@ -849,6 +1180,13 @@ func Run(t *testing.T, fixture Fixture) {
 			sort.Strings(ids)
 			if !reflect.DeepEqual(ids, []string{"child", "scoped"}) {
 				t.Fatalf("subscope List() IDs = %v", ids)
+			}
+		} else {
+			if err := acme.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithSubScopes()); !commonerrors.IsUnsupported(err) {
+				t.Fatalf("subscope List() error = %v, want Unsupported", err)
+			}
+			if _, err := acme.Count(t.Context(), &Object{}, commonstore.WithSubScopes()); !commonerrors.IsUnsupported(err) {
+				t.Fatalf("subscope Count() error = %v, want Unsupported", err)
 			}
 		}
 	})
@@ -882,11 +1220,20 @@ func Run(t *testing.T, fixture Fixture) {
 		if err != nil || count != 3 {
 			t.Fatalf("Count() = (%d, %v), want (3, nil)", count, err)
 		}
-		RunQueryCapabilities(t, fixture, storage)
+		RunQueries(t, fixture, storage)
 	})
 	t.Run("unique indexes", func(t *testing.T) {
-		if !fixture.Capabilities.UniqueIndexes {
-			t.Skip("unique indexes are not declared")
+		if !fixture.UniqueIndexes {
+			schema := commonstore.NewSchema()
+			if err := schema.Register(&Object{}, commonstore.ResourceSchema{Indexes: []commonstore.Index{
+				{Fields: []string{"value"}, Unique: true},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.New(t, schema); err == nil {
+				t.Fatal("store construction accepted an unsupported unique constraint")
+			}
+			return
 		}
 		storage := NewStore(t, fixture)
 		storage = storage.Scope(commonstore.Scope{Resource: "tenants", Name: "unique"})
@@ -900,13 +1247,13 @@ func Run(t *testing.T, fixture Fixture) {
 	})
 
 	t.Run("transaction commits or rolls back as one unit", func(t *testing.T) {
-		if !fixture.Capabilities.Transaction {
+		if !fixture.Transaction {
 			t.Skip("transactions are not declared")
 		}
 		storage := NewStore(t, fixture)
 		transactional, ok := storage.(commonstore.TransactionStore)
 		if !ok {
-			t.Fatal("the Transaction capability is declared without a TransactionStore")
+			t.Fatal("fixture expects transactions but store does not implement TransactionStore")
 		}
 		committed := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "committed"}, Value: "committed"}
 		if err := transactional.Transaction(t.Context(), func(ctx context.Context, tx commonstore.Store) error {
@@ -937,8 +1284,46 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 	})
 
+	for _, operation := range []struct {
+		name      string
+		supported bool
+		run       func(context.Context, commonstore.Store) error
+	}{
+		{"patch", fixture.PatchBatch, func(ctx context.Context, storage commonstore.Store) error {
+			return storage.PatchBatch(ctx, &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"rank": 9})
+		}},
+		{"delete", fixture.DeleteBatch, func(ctx context.Context, storage commonstore.Store) error {
+			return storage.DeleteBatch(ctx, &commonstore.List[Object]{})
+		}},
+	} {
+		if operation.supported {
+			continue
+		}
+		t.Run("unsupported batch "+operation.name, func(t *testing.T) {
+			storage := NewStore(t, fixture)
+			object := &Object{Value: "unchanged", Rank: 1}
+			if err := storage.Create(t.Context(), object); err != nil {
+				t.Fatal(err)
+			}
+			before := &Object{}
+			if err := storage.Get(t.Context(), object.ID, before); err != nil {
+				t.Fatal(err)
+			}
+			if err := operation.run(t.Context(), storage); !commonerrors.IsUnsupported(err) {
+				t.Fatalf("batch %s error = %v, want Unsupported", operation.name, err)
+			}
+			after := &Object{}
+			if err := storage.Get(t.Context(), object.ID, after); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("unsupported batch %s modified object: %#v", operation.name, after)
+			}
+		})
+	}
+
 	t.Run("batch patch and delete apply to matching objects", func(t *testing.T) {
-		if !fixture.Capabilities.PatchBatch || !fixture.Capabilities.DeleteBatch {
+		if !fixture.PatchBatch || !fixture.DeleteBatch {
 			t.Skip("batch operations are not declared")
 		}
 		storage := NewStore(t, fixture)
@@ -993,8 +1378,15 @@ func Run(t *testing.T, fixture Fixture) {
 		// expression over the latest row rather than a reason to read it.
 		copied := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "ops"}}
 		copyPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[{"op":"copy","from":"/value","path":"/tenant"}]`))
+		if fixture.MergePatchOnly {
+			rejectPatch(t, storage, copied, copyPatch)
+			return
+		}
 		if err := storage.Patch(t.Context(), copied, copyPatch); err != nil {
 			t.Fatalf("JSON patch copy error = %v", err)
+		}
+		if err := storage.Get(t.Context(), copied.ID, copied); err != nil {
+			t.Fatal(err)
 		}
 		if copied.Tenant != "one" || copied.Value != "one" {
 			t.Fatalf("JSON patch copy result = %#v", copied)
@@ -1004,10 +1396,438 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.Patch(t.Context(), moved, movePatch); err != nil {
 			t.Fatalf("JSON patch move error = %v", err)
 		}
+		if err := storage.Get(t.Context(), moved.ID, moved); err != nil {
+			t.Fatal(err)
+		}
 		if moved.Value != "one" || moved.Tenant != "" {
 			t.Fatalf("JSON patch move result = %#v", moved)
 		}
 	})
+}
+
+func runIdentity(t *testing.T, fixture Fixture) {
+	for _, test := range []struct{ name, first, second string }{
+		{"root duplicate", "", ""},
+		{"scoped duplicate", "acme", "acme"},
+		{"root to child", "", "acme"},
+		{"child to root", "acme", ""},
+		{"siblings", "acme", "other"},
+	} {
+		t.Run("identity/"+test.name, func(t *testing.T) {
+			root := NewStore(t, fixture)
+			first, second := root, root
+			if test.first != "" {
+				first = root.Scope(commonstore.Scope{Resource: "tenants", Name: test.first})
+			}
+			if test.second != "" {
+				second = root.Scope(commonstore.Scope{Resource: "tenants", Name: test.second})
+			}
+			original := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "shared"}, Value: "first"}
+			if err := first.Create(t.Context(), original); err != nil {
+				t.Fatal(err)
+			}
+			before := &Object{}
+			if err := first.Get(t.Context(), original.ID, before); err != nil {
+				t.Fatal(err)
+			}
+			duplicate := &Object{ObjectMeta: commonstore.ObjectMeta{ID: original.ID}, Value: "second"}
+			err := second.Create(t.Context(), duplicate)
+			if fixture.ResourceWideIDs || test.first == test.second {
+				if !commonerrors.IsAlreadyExists(err) {
+					t.Fatalf("duplicate Create() = %v, want AlreadyExists", err)
+				}
+				if test.first != test.second {
+					if err := second.Get(t.Context(), original.ID, &Object{}); !commonerrors.IsNotFound(err) {
+						t.Fatalf("other-scope Get() = %v, want NotFound", err)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("cross-scope Create() = %v", err)
+				}
+				stored := &Object{}
+				if err := second.Get(t.Context(), original.ID, stored); err != nil {
+					t.Fatal(err)
+				}
+				if stored.Value != "second" || stored.UID == before.UID {
+					t.Fatalf("cross-scope identity = %#v", stored)
+				}
+			}
+			after := &Object{}
+			if err := first.Get(t.Context(), original.ID, after); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("duplicate Create changed original: %#v", after)
+			}
+		})
+	}
+}
+
+func runFinalizers(t *testing.T, fixture Fixture) {
+	if !fixture.Capabilities.Finalizers {
+		for _, operation := range []string{"create", "update", "patch", "foreground delete"} {
+			t.Run("finalizers/unsupported/"+operation, func(t *testing.T) {
+				storage := NewStore(t, fixture)
+				object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "unsupported-finalizer"}, Value: "before"}
+				if operation == "create" {
+					object.Finalizers = []string{"example.com/retain"}
+					if err := storage.Create(t.Context(), object); !commonerrors.IsUnsupported(err) {
+						t.Fatalf("Create = %v, want Unsupported", err)
+					}
+					if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
+						t.Fatalf("rejected Create persisted: %v", err)
+					}
+					return
+				}
+				if err := storage.Create(t.Context(), object); err != nil {
+					t.Fatal(err)
+				}
+				before := &Object{}
+				if err := storage.Get(t.Context(), object.ID, before); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				switch operation {
+				case "update":
+					object.Finalizers = []string{"example.com/retain"}
+					object.ResourceVersion = 0
+					err = storage.Update(t.Context(), object)
+				case "patch":
+					err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": []string{"example.com/retain"}})
+				case "foreground delete":
+					err = storage.Delete(t.Context(), object, commonstore.WithPropagation(commonstore.DeletePropagationForeground))
+				}
+				if !commonerrors.IsUnsupported(err) {
+					t.Fatalf("operation = %v, want Unsupported", err)
+				}
+				after := &Object{}
+				if err := storage.Get(t.Context(), object.ID, after); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatalf("unsupported finalizer write changed object: %#v", after)
+				}
+			})
+		}
+		return
+	}
+
+	t.Run("finalizers/read does not restore removed finalizers", func(t *testing.T) {
+		storage := NewStore(t, fixture)
+		object := &Object{ObjectMeta: commonstore.ObjectMeta{Finalizers: []string{"example.com/retain"}}}
+		if err := storage.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+		target := &Object{ObjectMeta: commonstore.ObjectMeta{ID: object.ID}}
+		if err := storage.Patch(t.Context(), target, commonstore.MapMergePatch{"finalizers": nil}); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
+		}
+		if len(object.Finalizers) != 0 {
+			t.Fatalf("Get restored removed finalizers: %v", object.Finalizers)
+		}
+		if err := storage.Delete(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
+			t.Fatalf("Delete without finalizers = %v", err)
+		}
+	})
+	t.Run("finalizers/scoped replacement preserves identity", func(t *testing.T) {
+		root := NewStore(t, fixture)
+		storage := root.Scope(commonstore.Scope{Resource: "tenants", Name: "lifecycle"})
+		object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "scoped", Finalizers: []string{"example.com/retain"}}}
+		if err := storage.Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+		// A complete replacement may omit the backend's projected Scope fields.
+		desired := &Object{ObjectMeta: commonstore.ObjectMeta{ID: object.ID, Finalizers: []string{"example.com/retain"}}, Value: "changed"}
+		if err := storage.Update(t.Context(), desired); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), object.ID, object); err != nil {
+			t.Fatal(err)
+		}
+		if object.Value != "changed" || !reflect.DeepEqual(object.Scopes, []commonstore.Scope{{Resource: "tenants", Name: "lifecycle"}}) {
+			t.Fatalf("replacement lost scope: %#v", object)
+		}
+		if err := storage.Delete(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": nil}); err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
+			t.Fatalf("scoped finalizer completion = %v", err)
+		}
+	})
+	for _, operation := range []string{"update", "merge patch", "JSON patch"} {
+		t.Run("finalizers/terminating cannot add/"+operation, func(t *testing.T) {
+			storage := NewStore(t, fixture)
+			object := &Object{ObjectMeta: commonstore.ObjectMeta{Finalizers: []string{"example.com/retain"}}}
+			if err := storage.Create(t.Context(), object); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Delete(t.Context(), object); err != nil {
+				t.Fatal(err)
+			}
+			before := &Object{}
+			if err := storage.Get(t.Context(), object.ID, before); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch operation {
+			case "update":
+				object.Finalizers = []string{"example.com/retain", "example.com/new"}
+				object.ResourceVersion = 0 // Exercise the unconditional write contract.
+				err = storage.Update(t.Context(), object)
+			case "merge patch":
+				err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": []string{"example.com/retain", "example.com/new"}})
+			case "JSON patch":
+				err = storage.Patch(t.Context(), object, commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[{"op":"replace","path":"/finalizers","value":["example.com/new"]}]`)))
+			}
+			if fixture.MergePatchOnly && operation == "JSON patch" {
+				if !commonerrors.IsUnsupported(err) {
+					t.Fatalf("JSON patch = %v, want Unsupported", err)
+				}
+			} else if commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+				t.Fatalf("adding a finalizer error = %v, want BadRequest", err)
+			}
+			after := &Object{}
+			if err := storage.Get(t.Context(), object.ID, after); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejected write changed object: before %#v, after %#v", before, after)
+			}
+		})
+	}
+	if fixture.Capabilities.Watch {
+		for _, operation := range []string{"update", "patch"} {
+			t.Run("finalizers/completion emits only deletion/"+operation, func(t *testing.T) {
+				storage := NewStore(t, fixture)
+				object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "retained", Finalizers: []string{"example.com/retain"}}}
+				if err := storage.Create(t.Context(), object); err != nil {
+					t.Fatal(err)
+				}
+				if err := storage.Delete(t.Context(), object); err != nil {
+					t.Fatal(err)
+				}
+				watcher := OpenWatcher(t, func() (commonstore.Watcher, error) {
+					return storage.Watch(t.Context(), &commonstore.List[Object]{}, commonstore.WithSendInitialEvents())
+				})
+				defer watcher.Stop()
+				AssertWatchEvent(t, NextWatchEvent(t, watcher), commonstore.WatchEventCreate, object.ID)
+				AssertWatchEvent(t, NextWatchEvent(t, watcher), commonstore.WatchEventBookmark, "")
+				if operation == "patch" {
+					if err := storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": nil}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := storage.Get(t.Context(), object.ID, object); err != nil {
+						t.Fatal(err)
+					}
+					object.Finalizers = nil
+					object.ResourceVersion = 0 // Verify the unconditional lifecycle transition.
+					if err := storage.Update(t.Context(), object); err != nil {
+						t.Fatal(err)
+					}
+				}
+				AssertWatchEvent(t, NextObjectWatchEvent(t, watcher), commonstore.WatchEventDelete, object.ID)
+				if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
+					t.Fatalf("completed deletion Get = %v", err)
+				}
+			})
+		}
+	}
+	if fixture.DeleteBatch && fixture.PatchBatch {
+		t.Run("finalizers/batch follows lifecycle", func(t *testing.T) {
+			storage := NewStore(t, fixture)
+			retained := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "retained", Finalizers: []string{"example.com/retain"}}, Value: "before", Status: ObjectStatus{Phase: "pending"}}
+			plain := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "plain"}}
+			for _, object := range []*Object{retained, plain} {
+				if err := storage.Create(t.Context(), object); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := storage.DeleteBatch(t.Context(), &commonstore.List[Object]{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Get(t.Context(), plain.ID, &Object{}); !commonerrors.IsNotFound(err) {
+				t.Fatalf("plain Get = %v, want NotFound", err)
+			}
+			if err := storage.Get(t.Context(), retained.ID, retained); err != nil {
+				t.Fatal(err)
+			}
+			if retained.DeletionTimestamp == nil {
+				t.Fatal("DeleteBatch did not begin deletion")
+			}
+			version, generation := retained.ResourceVersion, retained.Generation
+			if err := storage.PatchBatch(t.Context(), &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"value": "after", "status": map[string]any{"phase": "ignored"}, "deletionTimestamp": nil}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Get(t.Context(), retained.ID, retained); err != nil {
+				t.Fatal(err)
+			}
+			if retained.Value != "after" || retained.Status.Phase != "pending" || retained.DeletionTimestamp == nil || retained.ResourceVersion <= version || retained.Generation != generation+1 {
+				t.Fatalf("batch patch violated update contract: %#v", retained)
+			}
+			if err := storage.PatchBatch(t.Context(), &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"finalizers": []string{"example.com/new"}}); fixture.BatchFinalizerRemovalOnly && !commonerrors.IsUnsupported(err) || !fixture.BatchFinalizerRemovalOnly && commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+				t.Fatalf("batch add finalizer = %v, want BadRequest", err)
+			}
+			if err := storage.PatchBatch(t.Context(), &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"finalizers": nil}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Get(t.Context(), retained.ID, &Object{}); !commonerrors.IsNotFound(err) {
+				t.Fatalf("retained Get = %v, want NotFound", err)
+			}
+		})
+	}
+	if fixture.TTL {
+		for _, operation := range []string{"update", "patch", "status update", "status patch"} {
+			t.Run("finalizers/writes preserve TTL/"+operation, func(t *testing.T) {
+				storage := NewStore(t, fixture)
+				object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "leased"}, Value: "before"}
+				if err := storage.Create(t.Context(), object, commonstore.WithTTL(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+				before := &Object{}
+				if err := storage.Get(t.Context(), object.ID, before); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				switch operation {
+				case "update":
+					object.Value = "after"
+					err = storage.Update(t.Context(), object)
+				case "patch":
+					err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"value": "after"})
+				case "status update":
+					object.Status.Phase = "ready"
+					err = storage.Status().
+						Update(t.Context(), object)
+				case "status patch":
+					err = storage.Status().
+						Patch(t.Context(), object, commonstore.MapMergePatch{"status": map[string]any{"phase": "ready"}})
+				}
+				if err != nil && !commonerrors.IsUnsupported(err) {
+					t.Fatal(err)
+				}
+				if commonerrors.IsUnsupported(err) {
+					after := &Object{}
+					if err := storage.Get(t.Context(), object.ID, after); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(before, after) {
+						t.Fatal("unsupported write changed leased object")
+					}
+				}
+				err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": []string{"example.com/retain"}})
+				if commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest && !commonerrors.IsUnsupported(err) {
+					t.Fatalf("write lost TTL: finalizer Patch = %v", err)
+				}
+			})
+		}
+
+		for _, operation := range []string{"create", "update TTL", "update finalizers", "patch finalizers", "delete foreground"} {
+			t.Run("finalizers/TTL excludes finalizers/"+operation, func(t *testing.T) {
+				storage := NewStore(t, fixture)
+				object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "leased"}}
+				if operation == "create" || operation == "update TTL" {
+					object.Finalizers = []string{"example.com/retain"}
+				}
+				if operation == "create" {
+					err := storage.Create(t.Context(), object, commonstore.WithTTL(time.Hour))
+					if commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+						t.Fatalf("TTL with finalizers = %v, want BadRequest", err)
+					}
+					if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
+						t.Fatalf("rejected Create persisted: %v", err)
+					}
+					return
+				}
+				var createOptions []commonstore.CreateOption
+				if operation != "update TTL" {
+					createOptions = append(createOptions, commonstore.WithTTL(time.Hour))
+				}
+				if err := storage.Create(t.Context(), object, createOptions...); err != nil {
+					t.Fatal(err)
+				}
+				before := &Object{}
+				if err := storage.Get(t.Context(), object.ID, before); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				switch operation {
+				case "update TTL":
+					err = storage.Update(t.Context(), object, commonstore.WithTTL(time.Hour))
+				case "update finalizers":
+					object.Finalizers = []string{"example.com/retain"}
+					err = storage.Update(t.Context(), object)
+				case "patch finalizers":
+					err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": []string{"example.com/retain"}})
+				case "delete foreground":
+					err = storage.Delete(t.Context(), object, commonstore.WithPropagation(commonstore.DeletePropagationForeground))
+				}
+				if commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest && !commonerrors.IsUnsupported(err) {
+					t.Fatalf("TTL with finalizers = %v, want BadRequest or Unsupported", err)
+				}
+				after := &Object{}
+				if err := storage.Get(t.Context(), object.ID, after); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatalf("rejected TTL/finalizer write changed object: %#v", after)
+				}
+			})
+		}
+	}
+	for _, policy := range []commonstore.DeletionPropagation{commonstore.DeletePropagationForeground, commonstore.DeletePropagationOrphan} {
+		t.Run("finalizers/repeated delete/"+string(policy), func(t *testing.T) {
+			storage := NewStore(t, fixture)
+			object := &Object{ObjectMeta: commonstore.ObjectMeta{Finalizers: []string{"example.com/retain"}}}
+			if err := storage.Create(t.Context(), object); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Delete(t.Context(), object); err != nil {
+				t.Fatal(err)
+			}
+			before := &Object{}
+			if err := storage.Get(t.Context(), object.ID, before); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Delete(t.Context(), object, commonstore.WithPropagation(policy)); err != nil {
+				t.Fatal(err)
+			}
+			after := &Object{}
+			if err := storage.Get(t.Context(), object.ID, after); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after.Finalizers, []string{"example.com/retain"}) || !reflect.DeepEqual(before.DeletionTimestamp, after.DeletionTimestamp) {
+				t.Fatalf("repeated Delete changed deletion intent: %#v", after)
+			}
+			list := &commonstore.List[Object]{}
+			if err := storage.List(t.Context(), list); err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Items) != 1 || list.Items[0].ID != object.ID {
+				t.Fatalf("List hid terminating object: %#v", list.Items)
+			}
+			count, err := storage.Count(t.Context(), &Object{})
+			if err != nil || count != 1 {
+				t.Fatalf("Count = %d, %v; want 1", count, err)
+			}
+			if err := storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": nil}); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Get(t.Context(), object.ID, &Object{}); !commonerrors.IsNotFound(err) {
+				t.Fatalf("Get after clearing finalizers = %v, want NotFound", err)
+			}
+		})
+	}
 }
 
 func assertSchemaSnapshot(t *testing.T, storage commonstore.Store) {
@@ -1019,32 +1839,21 @@ func assertSchemaSnapshot(t *testing.T, storage commonstore.Store) {
 	if err := schema.Register(&schemaMutationObject{}, commonstore.ResourceSchema{}); err != nil {
 		t.Fatalf("Schema().Register() error = %v", err)
 	}
-	if got := storage.Schema().Resources(); !reflect.DeepEqual(got, []string{"storetests"}) {
+	if got := storage.Schema().
+		Resources(); !reflect.DeepEqual(got, []string{"storetests"}) {
 		t.Fatalf("Schema() shares mutable state with Store: resources = %v", got)
 	}
 }
 
-// OpenWatcher waits for a Store adapter's asynchronous backend initialization.
+// OpenWatcher opens one subscription. A successful return must already be
+// subscribed; initialization waiting belongs to the Store and its Context.
 func OpenWatcher(t testing.TB, open func() (commonstore.Watcher, error)) commonstore.Watcher {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		watcher, err := open()
-		if err == nil {
-			return watcher
-		}
-		lastErr = err
-		select {
-		case <-deadline.C:
-			t.Fatalf("Watch() did not become ready: %v", lastErr)
-			return nil
-		case <-ticker.C:
-		}
+	watcher, err := open()
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
 	}
+	return watcher
 }
 
 // NextWatchEvent waits for the next successful Watch event.
@@ -1116,8 +1925,8 @@ func AssertWatcherClosed(t testing.TB, watcher commonstore.Watcher) {
 	}
 }
 
-// RunQueryCapabilities verifies behavior declared by the fixture.
-func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Store) {
+// RunQueries verifies supported queries and explicit rejection of unsupported ones.
+func RunQueries(t *testing.T, fixture Fixture, storage commonstore.Store) {
 	t.Helper()
 	fieldComposition := selector.Requirement{
 		Operator: selector.Or,
@@ -1145,37 +1954,39 @@ func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Sto
 		},
 	}
 	tests := []struct {
-		name      string
-		enabled   bool
-		options   []commonstore.ListOption
-		wantIDs   []string
-		wantTotal int
-		ordered   bool
+		name    string
+		enabled bool
+		options []commonstore.ListOption
+		wantIDs []string
+		ordered bool
 	}{
-		{name: "label selector", enabled: fixture.Capabilities.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(selector.RequirementEqual("example.com/team", "blue"))}, wantIDs: []string{"a", "b"}},
-		{name: "field selector", enabled: fixture.Capabilities.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.RequirementEqual("rank", 2))}, wantIDs: []string{"b"}},
-		{name: "composed field selector", enabled: fixture.Capabilities.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(fieldComposition)}, wantIDs: []string{"a", "c"}},
-		{name: "composed label selector", enabled: fixture.Capabilities.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(labelComposition)}, wantIDs: []string{"a", "c"}},
-		{name: "none selector", enabled: fixture.Capabilities.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.Requirement{})}, wantIDs: []string{}},
-		{name: "empty in selector", enabled: fixture.Capabilities.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.In))}, wantIDs: []string{}},
-		{name: "empty not-in selector", enabled: fixture.Capabilities.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.NotIn))}, wantIDs: []string{}},
-		{name: "all selector", enabled: fixture.Capabilities.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.Requirement{Operator: selector.All})}, wantIDs: []string{"a", "b", "c"}},
-		{name: "special label keys", enabled: fixture.Capabilities.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(selector.RequirementEqual("owner.name", "alice"), selector.RequirementEqual("$owner", "alice"))}, wantIDs: []string{"a"}},
-		{name: "search by name", enabled: fixture.Capabilities.Search, options: []commonstore.ListOption{commonstore.WithSearch("needle")}, wantIDs: []string{"a"}},
-		{name: "search by ID", enabled: fixture.Capabilities.Search, options: []commonstore.ListOption{commonstore.WithSearch("c")}, wantIDs: []string{"c"}},
-		{name: "explicit search fields", enabled: fixture.Capabilities.Search, options: []commonstore.ListOption{commonstore.WithSearch("c"), commonstore.WithSearchFields("name")}, wantIDs: []string{}},
-		{name: "indexed sort", enabled: fixture.Capabilities.Sort, options: []commonstore.ListOption{commonstore.WithSort("rank-")}, wantIDs: []string{"c", "b", "a"}, ordered: true},
-		{name: "window limit", enabled: true, options: []commonstore.ListOption{commonstore.WithSort("id+"), commonstore.WithLimit(2)}, wantIDs: []string{"a", "b"}, wantTotal: 3, ordered: true},
-		{name: "window offset", enabled: true, options: []commonstore.ListOption{commonstore.WithSort("id+"), commonstore.WithOffset(1), commonstore.WithLimit(1)}, wantIDs: []string{"b"}, wantTotal: 3, ordered: true},
-		{name: "window offset past end", enabled: true, options: []commonstore.ListOption{commonstore.WithSort("id+"), commonstore.WithOffset(3)}, wantIDs: []string{}, wantTotal: 3, ordered: true},
+		{name: "label selector", enabled: fixture.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(selector.RequirementEqual("example.com/team", "blue"))}, wantIDs: []string{"a", "b"}},
+		{name: "field selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.RequirementEqual("rank", 2))}, wantIDs: []string{"b"}},
+		{name: "composed field selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(fieldComposition)}, wantIDs: []string{"a", "c"}},
+		{name: "composed label selector", enabled: fixture.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(labelComposition)}, wantIDs: []string{"a", "c"}},
+		{name: "none selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.Requirement{})}, wantIDs: []string{}},
+		{name: "empty in selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.In))}, wantIDs: []string{}},
+		{name: "empty not-in selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.NotIn))}, wantIDs: []string{}},
+		{name: "all selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.Requirement{Operator: selector.All})}, wantIDs: []string{"a", "b", "c"}},
+		{name: "special label keys", enabled: fixture.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(selector.RequirementEqual("owner.name", "alice"), selector.RequirementEqual("$owner", "alice"))}, wantIDs: []string{"a"}},
+		{name: "search by name", enabled: fixture.Search, options: []commonstore.ListOption{commonstore.WithSearch("needle")}, wantIDs: []string{"a"}},
+		{name: "search by ID", enabled: fixture.Search, options: []commonstore.ListOption{commonstore.WithSearch("c")}, wantIDs: []string{"c"}},
+		{name: "explicit search fields", enabled: fixture.Search, options: []commonstore.ListOption{commonstore.WithSearch("c"), commonstore.WithSearchFields("name")}, wantIDs: []string{}},
+		{name: "indexed sort", enabled: fixture.Sort, options: []commonstore.ListOption{commonstore.WithSort("rank-")}, wantIDs: []string{"c", "b", "a"}, ordered: true},
+		{name: "window limit", enabled: true, options: []commonstore.ListOption{commonstore.WithSort("id+"), commonstore.WithLimit(2)}, wantIDs: []string{"a", "b"}, ordered: true},
+		{name: "window offset", enabled: true, options: []commonstore.ListOption{commonstore.WithSort("id+"), commonstore.WithOffset(1), commonstore.WithLimit(1)}, wantIDs: []string{"b"}, ordered: true},
+		{name: "window offset past end", enabled: true, options: []commonstore.ListOption{commonstore.WithSort("id+"), commonstore.WithOffset(3)}, wantIDs: []string{}, ordered: true},
 	}
 	for _, test := range tests {
-		if !test.enabled {
-			continue
-		}
 		t.Run(test.name, func(t *testing.T) {
 			list := &commonstore.List[Object]{Resource: "storetests"}
 			err := storage.List(t.Context(), list, test.options...)
+			if !test.enabled {
+				if !commonerrors.IsUnsupported(err) {
+					t.Fatalf("List() error = %v, want Unsupported", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("List() error = %v", err)
 			}
@@ -1186,16 +1997,10 @@ func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Sto
 			if !reflect.DeepEqual(ids, test.wantIDs) {
 				t.Fatalf("List() IDs = %v, want %v", ids, test.wantIDs)
 			}
-			wantTotal := test.wantTotal
-			if wantTotal == 0 {
-				wantTotal = len(test.wantIDs)
-			}
-			if list.Total == nil || *list.Total != wantTotal || list.Continue != "" {
-				t.Fatalf("List() metadata = %#v, want total %d and no cursor", list, wantTotal)
-			}
+
 		})
 	}
-	if fixture.Capabilities.FieldSelector {
+	if fixture.FieldSelector {
 		invalid := selector.Requirement{Operator: selector.And, Key: "rank"}
 		list := &commonstore.List[Object]{Resource: "storetests"}
 		err := storage.List(t.Context(), list, commonstore.WithFieldRequirements(invalid))
@@ -1225,12 +2030,20 @@ func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Sto
 			if ids := ObjectIDs(list.Items); !reflect.DeepEqual(ids, []string{"a"}) {
 				t.Fatalf("composed limited List() IDs = %v, want [a]", ids)
 			}
-			if list.Total == nil || *list.Total != 2 {
-				t.Fatalf("composed limited List() total = %v, want 2", list.Total)
-			}
+
 		}
 	}
-	if fixture.Capabilities.Projection {
+	if !fixture.Projection {
+		t.Run("unsupported projection", func(t *testing.T) {
+			if err := storage.Get(t.Context(), "a", &Object{}, commonstore.WithFields("value")); !commonerrors.IsUnsupported(err) {
+				t.Fatalf("projection Get() error = %v, want Unsupported", err)
+			}
+			list := &commonstore.List[Object]{}
+			if err := storage.List(t.Context(), list, commonstore.WithFields("value")); !commonerrors.IsUnsupported(err) {
+				t.Fatalf("projection List() error = %v, want Unsupported", err)
+			}
+		})
+	} else {
 		projected := &Object{}
 		if err := storage.Get(t.Context(), "a", projected, commonstore.WithFields("id", "value")); err != nil {
 			t.Fatalf("projection Get() error = %v", err)
@@ -1239,7 +2052,7 @@ func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Sto
 			t.Fatalf("projection Get() = %#v", projected)
 		}
 	}
-	if fixture.Capabilities.Continue {
+	if fixture.Continue {
 		seen := map[string]bool{}
 		continueToken := ""
 		for {
@@ -1248,9 +2061,7 @@ func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Sto
 			if err := storage.List(t.Context(), list, options...); err != nil {
 				t.Fatalf("cursor List() error = %v", err)
 			}
-			if list.Total != nil {
-				t.Fatalf("cursor List() metadata = %#v", list)
-			}
+
 			for _, item := range list.Items {
 				seen[item.ID] = true
 			}
@@ -1261,15 +2072,6 @@ func RunQueryCapabilities(t *testing.T, fixture Fixture, storage commonstore.Sto
 		}
 		if !reflect.DeepEqual(seen, map[string]bool{"a": true, "b": true, "c": true}) {
 			t.Fatalf("cursor List() IDs = %v", seen)
-		}
-		if fixture.Capabilities.ContinueWithSort {
-			list := &commonstore.List[Object]{Resource: "storetests"}
-			if err := storage.List(t.Context(), list, commonstore.WithContinue("", 1), commonstore.WithSort("id+")); err != nil {
-				t.Fatalf("cursor with sort List() error = %v", err)
-			}
-			if list.Total != nil {
-				t.Fatalf("cursor with sort List() metadata = %#v", list)
-			}
 		}
 	}
 }
@@ -1287,11 +2089,11 @@ func ObjectIDs(items []Object) []string {
 func NewStore(t testing.TB, fixture Fixture) commonstore.Store {
 	t.Helper()
 	schema := commonstore.NewSchema()
-	definition := commonstore.ResourceSchema{ScopeKeys: []string{"tenant"}}
-	if fixture.Capabilities.SecondaryIndexes {
+	definition := commonstore.ResourceSchema{ScopeKeys: []string{"tenant"}, GenerationFields: []string{"value", "rank"}}
+	if fixture.SecondaryIndexes {
 		definition.Indexes = append(definition.Indexes, commonstore.Index{Name: "rank", Fields: []string{"rank"}})
 	}
-	if fixture.Capabilities.UniqueIndexes {
+	if fixture.UniqueIndexes {
 		definition.Indexes = append(definition.Indexes, commonstore.Index{Name: "value", Fields: []string{"value"}, Unique: true, Nullable: true})
 	}
 	err := schema.Register(&Object{}, definition)
@@ -1303,4 +2105,268 @@ func NewStore(t testing.TB, fixture Fixture) commonstore.Store {
 		t.Fatalf("create conformance store: %v", err)
 	}
 	return storage
+}
+
+// runWriteOptions checks both the result and persisted state through Store.
+func runWriteOptions(t *testing.T, fixture Fixture) {
+	operations := []struct {
+		name      string
+		supported bool
+		run       func(context.Context, commonstore.Store, *Object) error
+	}{
+		{"create", true, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			return s.Create(ctx, obj, commonstore.WithDryRun())
+		}},
+		{"update", true, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			obj.Value = "changed"
+			return s.Update(ctx, obj, commonstore.WithDryRun())
+		}},
+		{"patch", true, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			return s.Patch(ctx, obj, commonstore.MapMergePatch{"value": "changed"}, commonstore.WithDryRun())
+		}},
+		{"status update", true, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			obj.Status.Phase = "changed"
+			return s.Status().
+				Update(ctx, obj, commonstore.WithDryRun())
+		}},
+		{"status patch", true, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			return s.Status().
+				Patch(ctx, obj, commonstore.MapMergePatch{"status": map[string]any{"phase": "changed"}}, commonstore.WithDryRun())
+		}},
+		{"delete", true, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			return s.Delete(ctx, obj, commonstore.WithDryRun())
+		}},
+		{"patch batch", fixture.PatchBatch, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			return s.PatchBatch(ctx, &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"value": "changed"}, commonstore.WithDryRun())
+		}},
+		{"delete batch", fixture.DeleteBatch, func(ctx context.Context, s commonstore.Store, obj *Object) error {
+			return s.DeleteBatch(ctx, &commonstore.List[Object]{}, commonstore.WithDryRun())
+		}},
+	}
+	for _, operation := range operations {
+		t.Run("dry run/"+operation.name, func(t *testing.T) {
+			s := NewStore(t, fixture)
+			object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "dry-run"}, Value: "before", Status: ObjectStatus{Phase: "pending"}}
+			if operation.name != "create" {
+				if err := s.Create(t.Context(), object); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := &Object{}
+			if operation.name != "create" {
+				if err := s.Get(t.Context(), object.ID, before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := operation.run(t.Context(), s, object)
+			if !fixture.DryRun || !operation.supported {
+				if !commonerrors.IsUnsupported(err) {
+					t.Errorf("operation error = %v, want Unsupported", err)
+				}
+			} else if err != nil {
+				t.Errorf("dry-run error = %v", err)
+			}
+			got := &Object{}
+			err = s.Get(t.Context(), "dry-run", got)
+			if operation.name == "create" {
+				if !commonerrors.IsNotFound(err) {
+					t.Fatalf("dry-run Create persisted object: Get error = %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, before) {
+					t.Fatalf("dry-run changed persisted state: got %#v, want %#v", got, before)
+				}
+			}
+		})
+	}
+	if !fixture.TTL {
+		for _, operation := range []string{"create", "update", "status update"} {
+			t.Run("unsupported TTL/"+operation, func(t *testing.T) {
+				s := NewStore(t, fixture)
+				obj := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "ttl"}, Value: "before"}
+				if operation != "create" {
+					if err := s.Create(t.Context(), obj); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := &Object{}
+				if operation != "create" {
+					if err := s.Get(t.Context(), obj.ID, before); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				switch operation {
+				case "create":
+					err = s.Create(t.Context(), obj, commonstore.WithTTL(time.Hour))
+				case "update":
+					obj.Value = "changed"
+					err = s.Update(t.Context(), obj, commonstore.WithTTL(time.Hour))
+				case "status update":
+					obj.Status.Phase = "changed"
+					err = s.Status().
+						Update(t.Context(), obj, commonstore.WithTTL(time.Hour))
+				}
+				if !commonerrors.IsUnsupported(err) {
+					t.Errorf("TTL error = %v, want Unsupported", err)
+				}
+				got := &Object{}
+				err = s.Get(t.Context(), "ttl", got)
+				if operation == "create" {
+					if !commonerrors.IsNotFound(err) {
+						t.Fatalf("unsupported TTL created object: %v", err)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, before) {
+						t.Fatalf("unsupported TTL changed object: %#v", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func rejectPatch(t *testing.T, storage commonstore.Store, obj *Object, patch commonstore.Patch) {
+	t.Helper()
+	before := &Object{}
+	if err := storage.Get(t.Context(), obj.ID, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Patch(t.Context(), obj, patch); !commonerrors.IsUnsupported(err) {
+		t.Fatalf("Patch = %v, want Unsupported", err)
+	}
+	after := &Object{}
+	if err := storage.Get(t.Context(), obj.ID, after); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("unsupported patch changed object: before=%#v after=%#v", before, after)
+	}
+}
+
+func runMutationConditions(t *testing.T, fixture Fixture) {
+	for _, operation := range []string{"update", "patch", "status update", "status patch", "delete"} {
+		for _, condition := range []string{"missing versioned object", "unmatched selector"} {
+			t.Run("conditional writes/"+operation+"/"+condition, func(t *testing.T) {
+				if condition == "missing versioned object" && !fixture.Capabilities.OptimisticLock || condition == "unmatched selector" && !fixture.FieldSelector {
+					t.Skip("condition unsupported")
+				}
+				storage := NewStore(t, fixture)
+				object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "target"}, Value: "before"}
+				version := int64(1)
+				var requirements commonstore.Requirements
+				var preconditions *commonstore.Preconditions
+				if condition == "missing versioned object" {
+					object.ResourceVersion = version
+					preconditions = &commonstore.Preconditions{ResourceVersion: &version}
+				} else {
+					if err := storage.Create(t.Context(), object); err != nil {
+						t.Fatal(err)
+					}
+					object.ResourceVersion = 0
+					requirements = commonstore.Requirements{selector.RequirementEqual("value", "other")}
+				}
+				patch := commonstore.MapMergePatch{"value": "after", "status": map[string]any{"phase": "ready"}}
+				var err error
+				switch operation {
+				case "update":
+					err = storage.Update(t.Context(), object, commonstore.WithFieldRequirements(requirements...))
+				case "status update":
+					err = storage.Status().
+						Update(t.Context(), object, commonstore.WithFieldRequirements(requirements...))
+				case "patch", "status patch":
+					options := []commonstore.PatchOption{commonstore.WithFieldRequirements(requirements...)}
+					if preconditions != nil {
+						options = append(options, commonstore.WithPreconditions(*preconditions))
+					}
+					if operation == "patch" {
+						err = storage.Patch(t.Context(), object, patch, options...)
+					} else {
+						err = storage.Status().
+							Patch(t.Context(), object, patch, options...)
+					}
+				case "delete":
+					options := []commonstore.DeleteOption{commonstore.WithFieldRequirements(requirements...)}
+					if preconditions != nil {
+						options = append(options, commonstore.WithPreconditions(*preconditions))
+					}
+					err = storage.Delete(t.Context(), object, options...)
+				}
+				if !commonerrors.IsConflict(err) {
+					t.Fatalf("conditional %s = %v, want Conflict", operation, err)
+				}
+				after := &Object{}
+				err = storage.Get(t.Context(), object.ID, after)
+				if condition == "missing versioned object" {
+					if !commonerrors.IsNotFound(err) {
+						t.Fatalf("failed write created object: %v", err)
+					}
+				} else if err != nil || after.Value != "before" || after.Status.Phase != "" {
+					t.Fatalf("failed write changed object: %#v, %v", after, err)
+				}
+			})
+		}
+	}
+	t.Run("continuation binds query", func(t *testing.T) {
+		if !fixture.Continue {
+			t.Skip("pagination unsupported")
+		}
+		storage := NewStore(t, fixture)
+		for _, id := range []string{"a", "b", "c"} {
+			if err := storage.Create(t.Context(), &Object{ObjectMeta: commonstore.ObjectMeta{ID: id}, Value: id}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		first := &commonstore.List[Object]{}
+		if err := storage.List(t.Context(), first, commonstore.WithLimit(1)); err != nil {
+			t.Fatal(err)
+		}
+		if first.Continue == "" || len(first.Items) != 1 {
+			t.Fatalf("first page = %#v", first)
+		}
+		for _, option := range []commonstore.ListOption{commonstore.WithOffset(1), commonstore.WithSort("id-")} {
+			if err := storage.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithContinue(first.Continue, 1), option); commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+				t.Fatalf("changed query = %v, want BadRequest", err)
+			}
+		}
+		other := storage.Scope(commonstore.Scope{Resource: "tenants", Name: "other"})
+		if err := other.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithContinue(first.Continue, 1)); commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+			t.Fatalf("changed scope = %v", err)
+		}
+		second := &commonstore.List[Object]{}
+		if err := storage.List(t.Context(), second, commonstore.WithContinue(first.Continue, 2)); err != nil {
+			t.Fatal(err)
+		}
+		if len(second.Items) != 2 || second.Items[0].ID == first.Items[0].ID || second.Continue != "" {
+			t.Fatalf("last page = %#v", second)
+		}
+	})
+	t.Run("count uses list search fields", func(t *testing.T) {
+		if !fixture.Search {
+			t.Skip("search unsupported")
+		}
+		storage := NewStore(t, fixture)
+		for _, value := range []string{"Alpha", "Beta", "alphabet"} {
+			if err := storage.Create(t.Context(), &Object{Value: value}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		count, err := storage.Count(t.Context(), &Object{}, commonstore.WithSearch("ALPHA"), commonstore.WithSearchFields("value"))
+		if err != nil || count != 2 {
+			t.Fatalf("Count = %d, %v, want 2", count, err)
+		}
+		list := &commonstore.List[Object]{}
+		if err := storage.List(t.Context(), list, commonstore.WithSearch("ALPHA"), commonstore.WithSearchFields("value")); err != nil {
+			t.Fatal(err)
+		}
+		if len(list.Items) != count {
+			t.Fatalf("List and Count differ: %d, %d", len(list.Items), count)
+		}
+	})
 }

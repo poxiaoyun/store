@@ -3,9 +3,8 @@ package store
 import (
 	"reflect"
 	"testing"
-
 	"time"
-	"xiaoshiai.cn/common/meta"
+
 	"xiaoshiai.cn/common/selector"
 )
 
@@ -15,22 +14,17 @@ func TestApplyListOptionsComposesInOrder(t *testing.T) {
 
 	options := ApplyListOptions([]ListOption{
 		WithOffset(1),
+		WithLimit(10),
 		WithFieldRequirements(first),
 		WithOffset(2),
+		WithLimit(25),
 		WithFieldRequirements(second),
 	})
-	if options.Offset != 2 {
-		t.Fatalf("offset = %d, want 2", options.Offset)
+	if options.Offset != 2 || options.Limit != 25 {
+		t.Fatalf("pagination = offset %d limit %d, want offset 2 limit 25", options.Offset, options.Limit)
 	}
 	if want := (Requirements{first, second}); !reflect.DeepEqual(options.FieldRequirements, want) {
 		t.Fatalf("FieldRequirements = %#v, want %#v", options.FieldRequirements, want)
-	}
-}
-
-func TestApplyListOptionsEmptyReturnsZeroValue(t *testing.T) {
-	options := ApplyListOptions(nil)
-	if !reflect.DeepEqual(options, ListOptions{}) {
-		t.Fatalf("ApplyListOptions(nil) = %#v", options)
 	}
 }
 
@@ -49,12 +43,12 @@ func TestApplyListOptionsAcceptsPaginationForms(t *testing.T) {
 		{
 			name:    "first cursor batch",
 			options: []ListOption{WithContinue("", 25)},
-			want:    ListOptions{Limit: 25, Continue: meta.Ptr("")},
+			want:    ListOptions{Limit: 25, Continue: ""},
 		},
 		{
 			name:    "later cursor batch",
 			options: []ListOption{WithContinue("next", 25)},
-			want:    ListOptions{Limit: 25, Continue: meta.Ptr("next")},
+			want:    ListOptions{Limit: 25, Continue: "next"},
 		},
 	}
 	for _, test := range tests {
@@ -64,18 +58,6 @@ func TestApplyListOptionsAcceptsPaginationForms(t *testing.T) {
 				t.Fatalf("ApplyListOptions() = %#v, want %#v", options, test.want)
 			}
 		})
-	}
-}
-
-func TestApplyListOptionsAppliesPaginationInOrder(t *testing.T) {
-	options := ApplyListOptions([]ListOption{
-		WithLimit(10),
-		WithOffset(2),
-		WithLimit(25),
-	})
-	want := ListOptions{Offset: 2, Limit: 25}
-	if !reflect.DeepEqual(options, want) {
-		t.Fatalf("ApplyListOptions() = %#v, want %#v", options, want)
 	}
 }
 
@@ -107,7 +89,9 @@ func TestSharedOptionsApplyAcrossOperations(t *testing.T) {
 	}
 
 	dryRun := WithDryRun()
-	if !ApplyCreateOptions([]CreateOption{dryRun}).DryRun || !ApplyPatchOptions([]PatchOption{dryRun}).DryRun {
+	if !ApplyCreateOptions([]CreateOption{dryRun}).
+		DryRun || !ApplyPatchOptions([]PatchOption{dryRun}).
+		DryRun {
 		t.Fatal("WithDryRun did not enable every supported operation")
 	}
 }
@@ -125,66 +109,5 @@ func TestPreconditionsOptionOverwritesOnlyPresentValues(t *testing.T) {
 	}
 	if options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != 7 {
 		t.Fatalf("ResourceVersion precondition = %#v", options.Preconditions)
-	}
-}
-
-var benchmarkListOptions ListOptions
-
-type legacyListOption func(*ListOptions)
-
-//go:noinline
-func applyLegacyListOptions(options []legacyListOption) ListOptions {
-	resolved := ListOptions{}
-	for _, option := range options {
-		option(&resolved)
-	}
-	return resolved
-}
-
-//go:noinline
-func legacyResolvedListOptions(options ListOptions) []legacyListOption {
-	return []legacyListOption{func(target *ListOptions) {
-		*target = options
-	}}
-}
-
-// BenchmarkResolvedListOptions isolates option construction and application;
-// selector parsing and backend query work are deliberately outside its scope.
-func BenchmarkResolvedListOptions(b *testing.B) {
-	public := ListOptions{
-		Offset: 20,
-		Limit:  20,
-		Search: "worker",
-		Sort:   "creationTimestamp-",
-	}
-
-	b.Run("captured-functional-option", func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			benchmarkListOptions = applyLegacyListOptions(legacyResolvedListOptions(public))
-		}
-	})
-
-	b.Run("concrete-options", func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			options := []ListOption{
-				metaListOption{
-					Offset:   public.Offset,
-					Limit:    public.Limit,
-					Search:   public.Search,
-					Sort:     public.Sort,
-					Continue: public.Continue,
-				},
-			}
-			benchmarkListOptions = ApplyListOptions(options)
-		}
-	})
-}
-
-func BenchmarkApplyListOptionsEmpty(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		benchmarkListOptions = ApplyListOptions(nil)
 	}
 }

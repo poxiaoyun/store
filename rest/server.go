@@ -84,6 +84,9 @@ func (s *Server) List(w http.ResponseWriter, r *http.Request) {
 			if fields := api.Query(r, "fields", ""); fields != "" {
 				listOptions = append(listOptions, store.WithFields(strings.Split(fields, ",")...))
 			}
+			if fields := api.Query(r, "searchFields", ""); fields != "" {
+				listOptions = append(listOptions, store.WithSearchFields(strings.Split(fields, ",")...))
+			}
 			list := store.List[store.Unstructured]{}
 			list.Resource = ref.Resource
 
@@ -93,6 +96,7 @@ func (s *Server) List(w http.ResponseWriter, r *http.Request) {
 				obj := &store.Unstructured{}
 				obj.SetResource(ref.Resource)
 				countOptions := []store.CountOption{
+					store.WithSearch(options.Search), store.WithSearchFields(options.SearchFields...),
 					store.WithLabelRequirements(options.LabelRequirements...),
 					store.WithFieldRequirements(options.FieldRequirements...),
 				}
@@ -196,8 +200,12 @@ func (s *Server) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		obj.SetResource(ref.Resource)
 
+		options := []store.CreateOption{store.WithTTL(api.Query(r, "ttl", time.Duration(0)))}
+		if api.Query(r, "dryRun", false) {
+			options = append(options, store.WithDryRun())
+		}
 		if err := s.Store.Scope(ref.Scopes...).
-			Create(ctx, obj, store.WithTTL(api.Query(r, "ttl", time.Duration(0)))); err != nil {
+			Create(ctx, obj, options...); err != nil {
 			return nil, err
 		}
 		return obj, nil
@@ -228,6 +236,9 @@ func (s *Server) Patch(w http.ResponseWriter, r *http.Request) {
 				store.WithLabelRequirements(labelsel...),
 				store.WithFieldRequirements(fildsel...),
 			}
+			if api.Query(r, "dryRun", false) {
+				opts = append(opts, store.WithDryRun())
+			}
 			list := store.List[store.Unstructured]{}
 			list.Resource = ref.Resource
 			if err := s.Store.Scope(ref.Scopes...).
@@ -242,6 +253,9 @@ func (s *Server) Patch(w http.ResponseWriter, r *http.Request) {
 		options := []store.PatchOption{
 			store.WithLabelRequirements(labelsel...),
 			store.WithFieldRequirements(fildsel...),
+		}
+		if api.Query(r, "dryRun", false) {
+			options = append(options, store.WithDryRun())
 		}
 
 		preconditions, err := decodePreconditions(r)
@@ -265,7 +279,7 @@ func (s *Server) Patch(w http.ResponseWriter, r *http.Request) {
 				return nil, err
 			}
 		}
-		return obj, nil
+		return nil, nil
 	})
 }
 
@@ -282,6 +296,9 @@ func (s *Server) Update(w http.ResponseWriter, r *http.Request) {
 			store.WithTTL(api.Query(r, "ttl", time.Duration(0))),
 			store.WithLabelRequirements(labelsel...),
 			store.WithFieldRequirements(fildsel...),
+		}
+		if api.Query(r, "dryRun", false) {
+			options = append(options, store.WithDryRun())
 		}
 		obj := &store.Unstructured{}
 		if err := api.Body(r, obj); err != nil {
@@ -304,7 +321,7 @@ func (s *Server) Update(w http.ResponseWriter, r *http.Request) {
 				return nil, err
 			}
 		}
-		return obj, nil
+		return nil, nil
 	})
 }
 
@@ -318,11 +335,12 @@ func (s *Server) Delete(w http.ResponseWriter, r *http.Request) {
 			}
 			list := store.List[store.Unstructured]{}
 			list.Resource = ref.Resource
+			options := []store.DeleteBatchOption{store.WithLabelRequirements(labelsel...), store.WithFieldRequirements(fildsel...)}
+			if api.Query(r, "dryRun", false) {
+				options = append(options, store.WithDryRun())
+			}
 			if err := s.Store.Scope(ref.Scopes...).
-				DeleteBatch(ctx, &list,
-					store.WithLabelRequirements(labelsel...),
-					store.WithFieldRequirements(fildsel...),
-				); err != nil {
+				DeleteBatch(ctx, &list, options...); err != nil {
 				return nil, err
 			}
 			return list, nil
@@ -334,6 +352,9 @@ func (s *Server) Delete(w http.ResponseWriter, r *http.Request) {
 		options := []store.DeleteOption{
 			store.WithLabelRequirements(labelRequirements...),
 			store.WithFieldRequirements(fieldRequirements...),
+		}
+		if api.Query(r, "dryRun", false) {
+			options = append(options, store.WithDryRun())
 		}
 		uid, uidProvided := r.URL.Query()["uid"]
 		resourceVersion, resourceVersionProvided := r.URL.Query()["resourceVersion"]

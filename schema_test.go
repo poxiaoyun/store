@@ -3,13 +3,13 @@ package store
 import "testing"
 
 type schemaTestObject struct {
-	ObjectMeta `json:"metadata,omitempty"`
+	ObjectMeta `json:"metadata"`
 }
 
 func (*schemaTestObject) ResourceName() string { return "users" }
 
 type schemaSnapshotObject struct {
-	ObjectMeta `json:"metadata,omitempty"`
+	ObjectMeta `json:"metadata"`
 }
 
 func (*schemaSnapshotObject) ResourceName() string { return "groups" }
@@ -66,7 +66,8 @@ func TestSchemaValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			object := &schemaTestObject{ObjectMeta: ObjectMeta{Resource: "users"}}
-			if err := NewSchema().Register(object, test.definition); err == nil {
+			if err := NewSchema().
+				Register(object, test.definition); err == nil {
 				t.Fatal("Register() error = nil")
 			}
 		})
@@ -134,5 +135,42 @@ func TestSchemaExplicitPrimaryReplacesDefault(t *testing.T) {
 	}
 	if primaryCount != 1 {
 		t.Fatalf("primary index count = %d, want 1", primaryCount)
+	}
+}
+
+func TestSchemaGenerationFields(t *testing.T) {
+	type resource struct {
+		ObjectMeta
+		Value   string         `json:"value"`
+		Details map[string]any `json:"details"`
+		Status  string         `json:"status"`
+	}
+	for _, fields := range [][]string{{"missing"}, {"status"}, {"id"}, {"value", "value"}, {"value.child"}} {
+		schema := NewSchema()
+		if err := schema.Register(&resource{}, ResourceSchema{GenerationFields: fields}); err == nil {
+			t.Fatalf("accepted invalid tracking fields %v", fields)
+		}
+	}
+	schema := NewSchema()
+	fields := []string{"value", "details.nested"}
+	if err := schema.Register(&resource{}, ResourceSchema{GenerationFields: fields}); err != nil {
+		t.Fatal(err)
+	}
+	fields[0] = "status"
+	definition, err := schema.Resource("resources")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.GenerationFields[0] != "value" {
+		t.Fatal("caller changed registered tracking fields")
+	}
+	definition.GenerationFields[0] = "status"
+	snapshot, err := schema.Snapshot().
+		Resource("resources")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.GenerationFields[0] != "value" {
+		t.Fatal("returned schema changed tracking fields")
 	}
 }

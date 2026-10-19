@@ -9,15 +9,6 @@ import (
 	"xiaoshiai.cn/store"
 )
 
-type queryObject struct {
-	store.ObjectMeta `json:",inline"`
-	Value            string            `json:"value"`
-	Rank             int64             `json:"rank"`
-	Extra            map[string]string `json:"extra"`
-}
-
-func (*queryObject) ResourceName() string { return "queryobjects" }
-
 // joinRequirementExpressions renders requirements and returns them joined, so a
 // test can compare the generated condition text.
 func joinRequirementExpressions(t *testing.T, storage *Storage, q *QueryState, requirements []selector.Requirement) (string, []any) {

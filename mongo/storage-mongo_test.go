@@ -18,9 +18,9 @@ import (
 	"xiaoshiai.cn/common/log"
 	"xiaoshiai.cn/common/meta"
 	"xiaoshiai.cn/common/selector"
+	testmongodb "xiaoshiai.cn/common/testkit/mongodb"
 	"xiaoshiai.cn/store"
 	"xiaoshiai.cn/store/storetest"
-	testmongodb "xiaoshiai.cn/common/testkit/mongodb"
 )
 
 type TestObject struct {
@@ -36,13 +36,6 @@ type TestObjectStatus struct {
 
 func (*TestObject) ResourceName() string {
 	return "testobjects"
-}
-
-func TestMongoStorageCapabilities(t *testing.T) {
-	capabilities := (&MongoStorage{}).Capabilities()
-	if !capabilities.Watch {
-		t.Fatal("Capabilities().Watch = false, want true")
-	}
 }
 
 func TestMongoStorageDottedScopeRoundTrip(t *testing.T) {
@@ -225,8 +218,8 @@ func TestMongoStorageScopeHierarchy(t *testing.T) {
 						t.Fatalf("projected List lost object scope: %#v", item)
 					}
 				}
-				if !slices.Equal(got, expected) || list.Total == nil || *list.Total != len(expected) {
-					t.Fatalf("List descendants=%v got %v total=%v, want %v", descendants, got, list.Total, expected)
+				if !slices.Equal(got, expected) {
+					t.Fatalf("List descendants=%v got %v, want %v", descendants, got, expected)
 				}
 				count, err := storage.Count(t.Context(), &TestObject{}, countOptions...)
 				if err != nil || count != len(expected) {
@@ -240,7 +233,7 @@ func TestMongoStorageScopeHierarchy(t *testing.T) {
 	if err := parent.List(t.Context(), list, store.WithSubScopes(), store.WithSort("id+"), store.WithOffset(1), store.WithLimit(1)); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Items) != 1 || list.Items[0].ID != "organization" || list.Total == nil || *list.Total != 3 {
+	if len(list.Items) != 1 || list.Items[0].ID != "organization" {
 		t.Fatalf("scope filtering must precede pagination and count: %#v", list)
 	}
 	if err := parent.PatchBatch(t.Context(), &store.List[TestObject]{}, store.RawPatchBatch(store.PatchTypeMergePatch, []byte(`{"description":"patched","scopes":[]}`))); err != nil {
@@ -286,18 +279,6 @@ func TestMongoStorageRejectsUnsupportedNestedRequirement(t *testing.T) {
 	}
 	list := &store.List[store.Unstructured]{Resource: "testobjects"}
 	err := (&MongoStorage{}).List(t.Context(), list, store.WithFieldRequirements(requirement))
-	if !commonerrors.IsUnsupported(err) {
-		t.Fatalf("List() error = %v, want Unsupported", err)
-	}
-}
-
-func TestMongoStorageRejectsCursorPagination(t *testing.T) {
-	storage := &MongoStorage{}
-	err := storage.List(
-		t.Context(),
-		&store.List[TestObject]{},
-		store.WithContinue("", 10),
-	)
 	if !commonerrors.IsUnsupported(err) {
 		t.Fatalf("List() error = %v, want Unsupported", err)
 	}
@@ -431,9 +412,22 @@ func TestMongoStorageIntegration(t *testing.T) {
 
 func TestStoreConformance(t *testing.T) {
 	uri := testmongodb.RequireURI(t)
-	capabilities := (&MongoStorage{}).Capabilities()
+	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 	storetest.Run(t, storetest.Fixture{
-		Capabilities: capabilities,
+		Capabilities:     capabilities,
+		Continue:         true,
+		LabelSelector:    true,
+		FieldSelector:    true,
+		Search:           true,
+		Sort:             true,
+		SubScopes:        true,
+		Projection:       true,
+		DeleteBatch:      true,
+		PatchBatch:       true,
+		Transaction:      true,
+		SecondaryIndexes: true,
+		UniqueIndexes:    true,
+
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
 			database := RequireIntegrationDatabase(t, uri)
 			core := &MongoStorageCore{
@@ -528,48 +522,6 @@ func NewIntegrationStorage(t testing.TB, database *mongo.Database, objects ...st
 		t.Fatalf("initialize MongoDB collections: %v", err)
 	}
 	return &MongoStorage{core: core}
-}
-
-func TestMergePatchToBsonUpdate(t *testing.T) {
-	type args struct {
-		data map[string]any
-	}
-	tests := []struct {
-		name    string
-		args    args
-		want    bson.D
-		wantErr bool
-	}{
-		{
-			name: "default",
-			args: args{
-				data: map[string]any{
-					"alias": "test",
-					"status": map[string]any{
-						"val": "test",
-					},
-				},
-			},
-			want: bson.D{
-				{Key: "$set", Value: bson.D{
-					{Key: "alias", Value: "test"},
-					{Key: "status.val", Value: "test"},
-				}},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := MergePatchToBsonUpdate(tt.args.data, nil, nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("MergePatchToBsonUpdate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(normalizeBSONDocument(got), normalizeBSONDocument(tt.want)) {
-				t.Errorf("MergePatchToBsonUpdate() = %v, want %v", got, tt.want)
-			}
-		})
-	}
 }
 
 func TestSelectorMatchUsesLiteralLabelKeys(t *testing.T) {
@@ -767,33 +719,6 @@ func literalLabelValue(input, key string) bson.D {
 	}
 }
 
-func normalizeBSONDocument(doc bson.D) bson.D {
-	normalized := make(bson.D, len(doc))
-	for i, elem := range doc {
-		normalized[i].Key = elem.Key
-		switch value := elem.Value.(type) {
-		case bson.D:
-			normalized[i].Value = normalizeBSONDocument(value)
-		case bson.A:
-			items := make(bson.A, len(value))
-			for i, item := range value {
-				if nested, ok := item.(bson.D); ok {
-					items[i] = normalizeBSONDocument(nested)
-				} else {
-					items[i] = item
-				}
-			}
-			normalized[i].Value = items
-		default:
-			normalized[i].Value = value
-		}
-	}
-	sort.SliceStable(normalized, func(i, j int) bool {
-		return normalized[i].Key < normalized[j].Key
-	})
-	return normalized
-}
-
 func TestMongoWatcherStopDoesNotCloseProducerChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	watcher := &MongoWatcher{
@@ -815,4 +740,14 @@ func TestMongoWatcherStopDoesNotCloseProducerChannel(t *testing.T) {
 		}
 	}()
 	watcher.results <- store.WatchEvent{Type: store.WatchEventBookmark}
+}
+
+func TestPartialFilterExpression(t *testing.T) {
+	want := bson.M{"$and": []bson.M{
+		{"email": bson.M{"$exists": true}},
+		{"tenant": bson.M{"$exists": true}},
+	}}
+	if got := PartialFilterExpression([]string{"email", "tenant"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("PartialFilterExpression() = %#v, want %#v", got, want)
+	}
 }

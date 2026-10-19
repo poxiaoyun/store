@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"sync/atomic"
 	"testing"
@@ -16,15 +17,24 @@ import (
 	"k8s.io/apiserver/pkg/storage/etcd3/testserver"
 	commonerrors "xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/selector"
-	"xiaoshiai.cn/common/store"
-	"xiaoshiai.cn/common/store/storetest"
+	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/storetest"
 )
 
 func TestStoreConformance(t *testing.T) {
 	client := testserver.RunEtcd(t, nil)
-	capabilities := (&generic{}).Capabilities()
+	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 	storetest.Run(t, storetest.Fixture{
-		Capabilities: capabilities,
+		Capabilities:     capabilities,
+		LabelSelector:    true,
+		FieldSelector:    true,
+		Search:           true,
+		Sort:             true,
+		Continue:         true,
+		SubScopes:        true,
+		TTL:              true,
+		SecondaryIndexes: true,
+
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
 			storage, err := NewEtcdCacherFromClient(t.Context(), client, schema, "/store-conformance/"+uuid.NewString())
 			if err == nil {
@@ -73,7 +83,7 @@ type MyObject struct {
 	store.ObjectMeta `json:",inline"`
 	Enabled          bool           `json:"enabled"`
 	Spec             MyObjectSpec   `json:"spec"`
-	Status           MyObjectStatus `json:"status,omitempty"`
+	Status           MyObjectStatus `json:"status"`
 }
 
 func (*MyObject) ResourceName() string { return "myobjects" }
@@ -166,7 +176,8 @@ func TestEtcdCacherStore(t *testing.T) {
 		statusUpdate.Spec.Value = "must-not-change"
 		statusUpdate.Status.Phase = "Running"
 		generation := got.Generation
-		if err := storage.Status().Update(ctx, &statusUpdate); err != nil {
+		if err := storage.Status().
+			Update(ctx, &statusUpdate); err != nil {
 			t.Fatalf("Status().Update() error = %v", err)
 		}
 		if err := storage.Get(ctx, got.ID, got); err != nil {
@@ -176,10 +187,11 @@ func TestEtcdCacherStore(t *testing.T) {
 			t.Fatalf("Status().Update() persisted %#v", got)
 		}
 
-		if err := storage.Status().Patch(ctx, got, store.MapMergePatch{
-			"status": map[string]any{"phase": "Ready"},
-			"spec":   map[string]any{"value": "must-not-change"},
-		}); err != nil {
+		if err := storage.Status().
+			Patch(ctx, got, store.MapMergePatch{
+				"status": map[string]any{"phase": "Ready"},
+				"spec":   map[string]any{"value": "must-not-change"},
+			}); err != nil {
 			t.Fatalf("Status().Patch() error = %v", err)
 		}
 		if got.Spec.Value != "json-patched" || got.Status.Phase != "Ready" || got.Generation != generation {
@@ -254,11 +266,10 @@ func TestEtcdCacherStore(t *testing.T) {
 		}
 
 		page := &store.List[MyObject]{}
-		if err := storage.List(ctx, page, store.WithPage(0, 1), store.WithSort("-name")); err != nil {
+		if err := storage.List(ctx, page, store.WithOffset(0), store.WithLimit(1), store.WithSort("-name")); err != nil {
 			t.Fatalf("List(local page) error = %v", err)
 		}
-		if len(page.Items) != 1 || page.Items[0].ID != "root-red" || page.Total == nil || *page.Total != 2 ||
-			page.Page != 1 || page.Size != 1 || page.Continue != "" || page.Limit != 0 {
+		if len(page.Items) != 1 || page.Items[0].ID != "root-red" || page.Continue == "" {
 			t.Fatalf("List(local page) = %#v", page)
 		}
 	})
@@ -285,14 +296,12 @@ func TestEtcdCacherStore(t *testing.T) {
 		for pageNumber := 0; ; pageNumber++ {
 			page := &store.List[MyObject]{}
 			if err := storage.List(ctx, page,
-				store.WithPage(99, 1),
-				store.WithContinuation(continueToken, 2),
+				store.WithContinue(continueToken, 2),
 				store.WithSearch("match"),
 			); err != nil {
 				t.Fatalf("List(page %d) error = %v", pageNumber, err)
 			}
-			if len(page.Items) == 0 || len(page.Items) > 2 || page.Total != nil ||
-				page.Page != 0 || page.Size != 0 || page.Limit != 2 {
+			if len(page.Items) == 0 || len(page.Items) > 2 {
 				t.Fatalf("List(page %d) = %#v", pageNumber, page)
 			}
 			for _, object := range page.Items {
@@ -382,7 +391,8 @@ func TestEtcdCacherStore(t *testing.T) {
 	t.Run("schema rejects unsupported unique indexes", func(t *testing.T) {
 		schema := store.NewSchema()
 		if err := schema.Register(&MyObject{}, store.ResourceSchema{
-			Indexes: []store.Index{{Name: "unique-name", Fields: []string{"name"}, Unique: true}},
+			GenerationFields: []string{"spec", "enabled"},
+			Indexes:          []store.Index{{Name: "unique-name", Fields: []string{"name"}, Unique: true}},
 		}); err != nil {
 			t.Fatalf("Register() error = %v", err)
 		}
@@ -402,6 +412,7 @@ func newMyObjectSchema(t *testing.T) *store.Schema {
 	t.Helper()
 	schema := store.NewSchema()
 	if err := schema.Register(&MyObject{}, store.ResourceSchema{
+		GenerationFields: []string{"spec", "enabled"},
 		Indexes: []store.Index{
 			{Name: "enabled", Fields: []string{"enabled"}},
 			{Name: "organization", Fields: []string{"organization"}},
@@ -478,5 +489,97 @@ func assertEventually(t *testing.T, timeout time.Duration, check func() error) {
 			t.Fatalf("condition not met within %s: %v", timeout, lastErr)
 		case <-ticker.C:
 		}
+	}
+}
+
+type numericSortObject struct {
+	store.ObjectMeta `json:",inline"`
+	Recommendation   map[string]int64  `json:"recommendation,omitempty"`
+	LatestVersion    map[string]string `json:"latestVersion,omitempty"`
+}
+
+func TestEtcdCacherNumericSortBeforePagination(t *testing.T) {
+	schema := store.NewSchema()
+	if err := schema.Register(&numericSortObject{}, store.ResourceSchema{
+		ScopeKeys: []string{"tenant"},
+		Indexes: []store.Index{
+			{Fields: []string{"recommendation.score"}},
+			{Fields: []string{"latestVersion.publicationTimestamp"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	storage := newTestStore(t, t.Context(), testserver.RunEtcd(t, nil), schema)
+	for _, item := range []struct {
+		tenant      string
+		id          string
+		score       int64
+		publication string
+	}{
+		{tenant: "a", id: "low", score: 10},
+		{tenant: "a", id: "high-old", score: 100, publication: "2026-09-01T00:00:00Z"},
+		{tenant: "a", id: "high-new", score: 100, publication: "2026-09-02T00:00:00Z"},
+		{tenant: "b", id: "middle", score: 90},
+		{tenant: "a", id: "zero", score: 0},
+		{tenant: "a", id: "unset", score: -1},
+	} {
+		object := &numericSortObject{
+			ObjectMeta:    store.ObjectMeta{ID: item.id},
+			LatestVersion: map[string]string{"publicationTimestamp": item.publication},
+		}
+		if item.score >= 0 {
+			object.Recommendation = map[string]int64{"score": item.score}
+		}
+		if err := storage.Scope(store.Scope{Resource: "tenants", Name: item.tenant}).
+			Create(t.Context(), object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertEventually(t, 5*time.Second, func() error {
+		list := &store.List[numericSortObject]{}
+		if err := storage.List(t.Context(), list, store.WithSubScopes()); err != nil {
+			return err
+		}
+		if len(list.Items) != 6 {
+			return fmt.Errorf("cache contains %d objects, want 6", len(list.Items))
+		}
+		return nil
+	})
+	const sort = "recommendation.score-,latestVersion.publicationTimestamp-,time-,tenant+,id+"
+	for _, tt := range []struct {
+		name   string
+		tenant string
+		page   int
+		want   []string
+	}{
+		{name: "first page", page: 1, want: []string{"high-new", "high-old"}},
+		{name: "second page", page: 2, want: []string{"middle", "low"}},
+		{name: "unrecommended page", page: 3, want: []string{"zero", "unset"}},
+		{name: "tenant first page", tenant: "a", page: 1, want: []string{"high-new", "high-old"}},
+		{name: "tenant second page", tenant: "a", page: 2, want: []string{"low", "zero"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var scoped store.Store = storage
+
+			options := []store.ListOption{store.WithOffset((tt.page - 1) * 2), store.WithLimit(2), store.WithSort(sort)}
+			if tt.tenant == "" {
+				options = append(options, store.WithSubScopes())
+			} else {
+				scoped = storage.Scope(store.Scope{Resource: "tenants", Name: tt.tenant})
+
+			}
+			list := &store.List[numericSortObject]{}
+			if err := scoped.List(t.Context(), list, options...); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, len(list.Items))
+			for i, item := range list.Items {
+				got[i] = item.ID
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("page order = %v, want %v", got, tt.want)
+			}
+
+		})
 	}
 }

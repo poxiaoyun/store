@@ -1,12 +1,14 @@
-package controller
+package controller_test
 
 import (
+	"slices"
 	"testing"
 
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/controller"
 )
 
-func Test_decodeScopes(t *testing.T) {
+func TestScopesRoundTrip(t *testing.T) {
 	tests := [][]store.Scope{
 		{
 			{Resource: "foo", Name: "bar"},
@@ -23,10 +25,10 @@ func Test_decodeScopes(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		encoded := EncodeScopes(tt)
-		decoded := DecodeScopes(encoded)
-		if len(tt) != len(decoded) {
-			t.Errorf("decodeScopes() = %v, want %v", decoded, tt)
+		encoded := controller.EncodeScopes(tt)
+		decoded := controller.DecodeScopes(encoded)
+		if !slices.Equal(tt, decoded) {
+			t.Errorf("DecodeScopes(%q) = %v, want %v", encoded, decoded, tt)
 		}
 	}
 }

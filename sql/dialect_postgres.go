@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"reflect"
@@ -43,7 +44,8 @@ func (PostgresDialect) ColumnType(field string, t reflect.Type, size int, indexe
 		return "bigint", nil
 	case base.Kind() == reflect.Float32 || base.Kind() == reflect.Float64:
 		return "double precision", nil
-	case base.Kind() == reflect.Slice && base.Elem().Kind() == reflect.Uint8:
+	case base.Kind() == reflect.Slice && base.Elem().
+		Kind() == reflect.Uint8:
 		return "bytea", nil
 	case base.Kind() == reflect.Map, base.Kind() == reflect.Struct,
 		base.Kind() == reflect.Slice, base.Kind() == reflect.Array, base.Kind() == reflect.Interface:
@@ -53,7 +55,7 @@ func (PostgresDialect) ColumnType(field string, t reflect.Type, size int, indexe
 	}
 }
 
-func (d PostgresDialect) CreateTable(table string, columns []ColumnSpec, key []string) (string, error) {
+func (d PostgresDialect) CreateTable(table string, columns []ColumnSpec) (string, error) {
 	definitions := make([]string, 0, len(columns)+1)
 	for _, column := range columns {
 		definition, err := d.columnDefinition(column)
@@ -62,13 +64,7 @@ func (d PostgresDialect) CreateTable(table string, columns []ColumnSpec, key []s
 		}
 		definitions = append(definitions, definition)
 	}
-	if len(key) > 0 {
-		quoted := make([]string, 0, len(key))
-		for _, name := range key {
-			quoted = append(quoted, d.Quote(name))
-		}
-		definitions = append(definitions, "PRIMARY KEY ("+strings.Join(quoted, ", ")+")")
-	}
+	definitions = append(definitions, "PRIMARY KEY ("+d.Quote("id")+")")
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", d.Quote(table), strings.Join(definitions, ", ")), nil
 }
 
@@ -88,9 +84,6 @@ func (d PostgresDialect) columnDefinition(column ColumnSpec) (string, error) {
 	return d.Quote(column.Name) + " " + columnType, nil
 }
 
-// UpdateReturning returns the written row, so a write needs no follow-up read.
-func (PostgresDialect) UpdateReturning() string { return " RETURNING *" }
-
 // Window renders the row window. PostgreSQL accepts OFFSET on its own.
 func (PostgresDialect) Window(limitPlaceholder, offsetPlaceholder string) string {
 	clause := ""
@@ -101,21 +94,6 @@ func (PostgresDialect) Window(limitPlaceholder, offsetPlaceholder string) string
 		clause += " OFFSET " + offsetPlaceholder
 	}
 	return clause
-}
-
-// NotDistinct renders PostgreSQL's null-safe equality.
-func (PostgresDialect) NotDistinct(left, right string) string {
-	return left + " IS NOT DISTINCT FROM " + right
-}
-
-// JSONExtract renders a jsonb extraction of one nested path.
-func (d PostgresDialect) JSONExtract(column string, remainingPath []string) (string, error) {
-	return fmt.Sprintf("%s #> %s", column, postgresJSONPath(remainingPath)), nil
-}
-
-// Distinct renders PostgreSQL's null-safe inequality.
-func (PostgresDialect) Distinct(left, right string) string {
-	return left + " IS DISTINCT FROM " + right
 }
 
 // JSONValue casts JSON text into a jsonb value.
@@ -135,14 +113,6 @@ func postgresJSONPath(path []string) string {
 		segments = append(segments, quotedLiteral(segment))
 	}
 	return "ARRAY[" + strings.Join(segments, ", ") + "]"
-}
-
-func (d PostgresDialect) JSONSet(column string, remainingPath []string, placeholder string) string {
-	return fmt.Sprintf("jsonb_set(%s, %s, %s::jsonb)", column, postgresJSONPath(remainingPath), placeholder)
-}
-
-func (d PostgresDialect) JSONRemove(column string, remainingPath []string) string {
-	return fmt.Sprintf("%s #- %s", column, postgresJSONPath(remainingPath))
 }
 
 func (d PostgresDialect) IndexDDL(table string, index store.Index) ([]string, error) {
@@ -169,11 +139,11 @@ func (d PostgresDialect) IndexDDL(table string, index store.Index) ([]string, er
 		unique, d.Quote(index.Name), d.Quote(table), strings.Join(columns, ", "))}, nil
 }
 
-func (PostgresDialect) Columns(ctx context.Context, db StatementExecutor, table string) (map[string]ColumnInfo, error) {
+func (d PostgresDialect) Columns(ctx context.Context, db StatementExecutor, table string) (map[string]ColumnInfo, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT column_name, data_type
-FROM information_schema.columns
-WHERE table_schema = current_schema() AND table_name = $1`, table)
+SELECT attname, format_type(atttypid, atttypmod)
+FROM pg_attribute
+WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped`, d.Quote(table))
 	if err != nil {
 		return nil, err
 	}
@@ -189,17 +159,16 @@ WHERE table_schema = current_schema() AND table_name = $1`, table)
 	return result, rows.Err()
 }
 
-func (PostgresDialect) Indexes(ctx context.Context, db StatementExecutor, table string) (map[string]IndexInfo, error) {
+func (d PostgresDialect) Indexes(ctx context.Context, db StatementExecutor, table string) (map[string]IndexInfo, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT i.relname AS index_name, ix.indisunique AS is_unique,
-       array_to_string(array_agg(a.attname ORDER BY k.ord), ',') AS columns
+SELECT i.relname, ix.indisprimary, a.attname
 FROM pg_index ix
 JOIN pg_class i ON i.oid = ix.indexrelid
 JOIN pg_class t ON t.oid = ix.indrelid
-LEFT JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+LEFT JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON k.ord <= ix.indnkeyatts
 LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-WHERE t.relname = $1 AND a.attname IS NOT NULL
-GROUP BY i.relname, ix.indisunique`, table)
+WHERE t.oid = to_regclass($1)
+ORDER BY i.relname, k.ord`, d.Quote(table))
 	if err != nil {
 		return nil, err
 	}
@@ -208,19 +177,55 @@ GROUP BY i.relname, ix.indisunique`, table)
 	for rows.Next() {
 		var (
 			name    string
-			unique  bool
-			columns sql.NullString
+			primary bool
+			column  sql.NullString
 		)
-		if err := rows.Scan(&name, &unique, &columns); err != nil {
+		if err := rows.Scan(&name, &primary, &column); err != nil {
 			return nil, err
 		}
-		info := IndexInfo{Name: name, Unique: unique}
-		if columns.Valid && columns.String != "" {
-			info.Columns = strings.Split(columns.String, ",")
+		info := result[name]
+		info.Primary = primary
+		if column.Valid {
+			info.Columns = append(info.Columns, column.String)
 		}
 		result[name] = info
 	}
 	return result, rows.Err()
+}
+
+func (d PostgresDialect) ValidateIndex(ctx context.Context, db StatementExecutor, table string, index store.Index) error {
+	q := &QueryState{dialect: d}
+	relation := q.Bind(d.Quote(table))
+	name := q.Bind(index.Name)
+	conditions := []string{
+		"ix.indisunique = " + q.Bind(index.Unique),
+		"ix.indisvalid", "ix.indisready", "ix.indpred IS NULL",
+		"ix.indnkeyatts = " + q.Bind(len(index.Fields)),
+	}
+	for i, field := range index.Fields {
+		path := JSONPath(field)
+		expected := "quote_ident(" + q.Bind(path[0]) + ")"
+		if len(path) > 1 {
+			encoded, _ := json.Marshal(path[1:])
+			// Use PostgreSQL's own identifier and literal quoting to compare its
+			// deparsed expression, without interpreting arbitrary SQL in Go.
+			expected = "'((' || " + expected + " || ' #>> ARRAY[' || " +
+				"(SELECT string_agg(quote_literal(value) || '::text', ', ' ORDER BY ord) FROM jsonb_array_elements_text(" +
+				q.Bind(string(encoded)) + "::jsonb) WITH ORDINALITY AS path(value, ord)) || ']))'"
+		}
+		conditions = append(conditions, fmt.Sprintf("pg_get_indexdef(ix.indexrelid, %d, false) = (%s)", i+1, expected))
+	}
+	statement := "SELECT " + strings.Join(conditions, " AND ") +
+		" FROM pg_index ix JOIN pg_class i ON i.oid = ix.indexrelid WHERE ix.indrelid = to_regclass(" + relation + ") AND i.relname = " + name
+	var matches bool
+	if err := db.QueryRowContext(ctx, statement, q.args...).
+		Scan(&matches); err != nil {
+		return err
+	}
+	if !matches {
+		return fmt.Errorf("table %q index %q conflicts with the declared definition", table, index.Name)
+	}
+	return nil
 }
 
 func (PostgresDialect) MapError(err error, resource, name string) error {
@@ -250,4 +255,24 @@ func (PostgresDialect) IsRetryableConflict(err error) bool {
 		}
 	}
 	return false
+}
+
+func (PostgresDialect) Distinct(left, right string) string {
+	return "(" + left + " IS DISTINCT FROM " + right + ")"
+}
+func (PostgresDialect) MergeDocument(q *QueryState, column string, patch map[string]any) string {
+	expression := "(CASE WHEN jsonb_typeof(" + column + ") = 'object' THEN " + column + " ELSE '{}'::jsonb END)"
+	nonnull := map[string]any{}
+	for _, key := range sortedKeys(patch) {
+		if patch[key] == nil {
+			expression = "(" + expression + " - " + q.Bind(key) + "::text)"
+		} else {
+			nonnull[key] = patch[key]
+		}
+	}
+	data, _ := json.Marshal(nonnull)
+	return "(" + expression + " || " + q.Bind(string(data)) + "::jsonb)"
+}
+func (PostgresDialect) FinalizersEmpty(column string) string {
+	return "(" + column + " IS NULL OR " + column + " = 'null'::jsonb OR " + column + " = '[]'::jsonb)"
 }

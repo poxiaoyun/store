@@ -3,10 +3,8 @@ package mongo
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	stderrors "errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"slices"
 	"strconv"
@@ -24,7 +22,6 @@ import (
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/log"
 	"xiaoshiai.cn/common/meta"
-	libreflect "xiaoshiai.cn/common/reflect"
 	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
 )
@@ -100,7 +97,7 @@ func (b BsonTimeCodec) DecodeValue(ctx bsoncodec.DecodeContext, vr bsonrw.ValueR
 
 // EncodeValue implements bsoncodec.ValueEncoder.
 func (BsonTimeCodec) EncodeValue(ctx bsoncodec.EncodeContext, vw bsonrw.ValueWriter, v reflect.Value) error {
-	t, ok := v.Interface().(meta.Time)
+	t, ok := reflect.TypeAssert[meta.Time](v)
 	if !ok {
 		return stderrors.New("invalid time")
 	}
@@ -126,7 +123,7 @@ func (b BsonQuantityCodec) DecodeValue(ctx bsoncodec.DecodeContext, vr bsonrw.Va
 
 // EncodeValue implements bsoncodec.ValueEncoder.
 func (BsonQuantityCodec) EncodeValue(ctx bsoncodec.EncodeContext, vw bsonrw.ValueWriter, v reflect.Value) error {
-	quantity, ok := v.Interface().(resource.Quantity)
+	quantity, ok := reflect.TypeAssert[resource.Quantity](v)
 	if !ok {
 		return stderrors.New("invalid quantity")
 	}
@@ -255,19 +252,7 @@ type MongoStorage struct {
 
 // Capabilities implements store.Store.
 func (m *MongoStorage) Capabilities() store.Capabilities {
-	return store.Capabilities{
-		LabelSelector:    true,
-		FieldSelector:    true,
-		Search:           true,
-		Sort:             true,
-		SubScopes:        true,
-		Projection:       true,
-		OptimisticLock:   true,
-		Watch:            true,
-		Transaction:      true,
-		SecondaryIndexes: true,
-		UniqueIndexes:    true,
-	}
+	return store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 }
 
 func (m *MongoStorage) Ping(ctx context.Context) error {
@@ -301,6 +286,13 @@ func (m *MongoStorage) Count(ctx context.Context, obj store.Object, opts ...stor
 	var count int
 	err := m.on(ctx, obj, options.IncludeSubScopes, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
 		filter = ConditionsMatch(filter, options.LabelRequirements, options.FieldRequirements, "")
+		if options.Search != "" {
+			fields := options.SearchFields
+			if len(fields) == 0 {
+				fields = []string{"id", "name"}
+			}
+			filter = append(filter, searchStage(fields, options.Search))
+		}
 		m.core.logger.V(5).
 			Info("count", "collection", col.Name(), "filter", filter)
 		doccount, err := col.CountDocuments(ctx, filter)
@@ -315,7 +307,13 @@ func (m *MongoStorage) Count(ctx context.Context, obj store.Object, opts ...stor
 
 // Create implements Storage.
 func (m *MongoStorage) Create(ctx context.Context, into store.Object, opts ...store.CreateOption) error {
-	_ = store.ApplyCreateOptions(opts)
+	options := store.ApplyCreateOptions(opts)
+	if options.DryRun {
+		return errors.NewUnsupported("MongoDB store does not support dry-run")
+	}
+	if options.TTL != 0 {
+		return errors.NewUnsupported("MongoDB store does not support TTL")
+	}
 	return m.on(ctx, into, false, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
 		store.PrepareObjectForCreate(into, col.Name(), slices.Clone(m.scopes))
 		into.SetResourceVersion(1)
@@ -391,12 +389,17 @@ loop:
 }
 
 // Delete implements Storage.
-func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
+func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
 	id := obj.GetID()
 	if id == "" {
 		return errors.NewBadRequest("id is required")
 	}
 	options := store.ApplyDeleteOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || options.Preconditions != nil && (options.Preconditions.UID != nil || options.Preconditions.ResourceVersion != nil)
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("MongoDB store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -420,7 +423,7 @@ func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...sto
 			if options.PropagationPolicy != nil {
 				policy = *options.PropagationPolicy
 			}
-			versionFilter := append(slices.Clone(filter), bson.E{Key: "resourceVersion", Value: current.GetResourceVersion()})
+			versionFilter := append(slices.Clone(filter), bson.E{Key: "resourceVersion", Value: current.GetResourceVersion()}, bson.E{Key: "uid", Value: current.GetUID()})
 			if store.PrepareObjectForDelete(current, policy) {
 				result, err := col.DeleteOne(ctx, versionFilter)
 				if err != nil {
@@ -449,17 +452,21 @@ func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...sto
 }
 
 // DeleteAllOf implements Storage.
-func (m *MongoStorage) DeleteBatch(ctx context.Context, obj store.ObjectList, opts ...store.DeleteBatchOption) error {
+func (m *MongoStorage) DeleteBatch(ctx context.Context, list store.ObjectList, opts ...store.DeleteBatchOption) error {
 	options := store.ApplyDeleteBatchOptions(opts)
-	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
+	if options.DryRun {
+		return errors.NewUnsupported("store does not support dry-run")
+	}
+	if err := m.List(ctx, list, store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...)); err != nil {
 		return err
 	}
-	return m.on(ctx, obj, false, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
-		filter = ConditionsMatch(filter, options.LabelRequirements, options.FieldRequirements, "")
-		m.core.logger.V(5).
-			Info("delete all", "collection", col.Name(), "filter", filter)
-		if _, err := col.DeleteMany(ctx, filter); err != nil {
-			return WarpMongoError(err, col, nil)
+	return store.ForEachItem(list, func(item store.Object) error {
+		err := m.Delete(ctx, item, store.WithUID(item.GetUID()), store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...))
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
 		}
 		return nil
 	})
@@ -492,9 +499,10 @@ func (m *MongoStorage) Get(ctx context.Context, id string, obj store.Object, opt
 		}
 		m.core.logger.V(5).
 			Info("get", "collection", col.Name(), "filter", filter)
+		store.ResetObject(obj)
 		if err := col.FindOne(ctx, filter, findopt).
 			Decode(obj); err != nil {
-			return WarpMongoError(err, col, obj)
+			return ConvetMongoError(err, col, id)
 		}
 		obj.SetResource(col.Name())
 		obj.SetScopes(slices.Clone(m.scopes))
@@ -503,9 +511,17 @@ func (m *MongoStorage) Get(ctx context.Context, id string, obj store.Object, opt
 }
 
 // Update implements Storage.
-func (m *MongoStorage) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (m *MongoStorage) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	options := store.ApplyUpdateOptions(opts)
-	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, false, obj.GetResourceVersion(), func(current, desired store.Object) error {
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("MongoDB store does not support dry-run")
+	}
+	if options.TTL != 0 {
+		return errors.NewUnsupported("MongoDB store does not support TTL")
+	}
+	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, false, obj.GetResourceVersion(), nil, func(current, desired store.Object) error {
 		return store.CopyObject(obj, desired)
 	})
 }
@@ -519,216 +535,44 @@ func (m *MongoStorage) Patch(ctx context.Context, obj store.Object, patch store.
 // The patch carries no precondition on the version the caller observed: only its
 // own resourceVersion, its tests and the caller's preconditions decide whether it
 // applies, so concurrent writers do not conflict.
-func (m *MongoStorage) patch(ctx context.Context, obj store.Object, patch store.Patch, status bool, options store.PatchOptions) error {
-	if obj.GetID() == "" {
-		return errors.NewBadRequest("id is required")
+func (m *MongoStorage) patch(ctx context.Context, obj store.Object, patch store.Patch, status bool, options store.PatchOptions) (result error) {
+	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+	if options.DryRun {
+		return errors.NewUnsupported("MongoDB store does not support dry-run")
 	}
-	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
-		return err
-	}
-	decoded, err := store.DecodePatch(patch, obj)
-	if err != nil {
-		return err
-	}
-	update, emptiesFinalizers, err := m.patchUpdate(decoded, status)
-	if err != nil {
-		return err
-	}
-	conditions, err := patchConditions(decoded, options.Preconditions)
-	if err != nil {
-		return err
-	}
-	return m.on(ctx, obj, false, func(ctx context.Context, col *mongo.Collection, scope bson.D) error {
-		selection := append(scope, bson.E{Key: "id", Value: obj.GetID()})
-		selection = ConditionsMatch(selection, options.LabelRequirements, options.FieldRequirements, "")
-		updated := store.NewObject(obj)
-		filter := bson.D{{Key: "$and", Value: bson.A{selection, conditions}}}
-		result := col.FindOneAndUpdate(ctx, filter, update,
-			mongooptions.FindOneAndUpdate().SetReturnDocument(mongooptions.After))
-		if err := result.Decode(updated); err != nil {
-			if !stderrors.Is(err, mongo.ErrNoDocuments) {
-				return WarpMongoError(err, col, obj)
-			}
-			// A patch with no condition of its own can only miss because the
-			// object is gone or unselected, which needs no re-read.
-			if len(conditions) == 0 {
-				return WarpMongoError(err, col, obj)
-			}
-			// A miss is a missing or unselected object, a stale condition, or
-			// both. Re-reading without the patch's own conditions tells them apart.
-			current := store.NewObject(obj)
-			if err := col.FindOne(ctx, selection).Decode(current); err != nil {
-				return WarpMongoError(err, col, obj)
-			}
-			current.SetResource(col.Name())
-			if err := store.ValidatePreconditions(current, options.Preconditions); err != nil {
-				return err
-			}
-			if decoded.Version != 0 && current.GetResourceVersion() != decoded.Version {
-				return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("resourceVersion %d does not match", decoded.Version))
-			}
-			if len(decoded.Tests) > 0 {
-				return errors.NewCustomError(http.StatusUnprocessableEntity, errors.StatusReasonInvalid,
-					fmt.Sprintf("invalid %s %q: patch test failed", col.Name(), obj.GetID()))
-			}
-			return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("object changed during the write"))
+	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, status, 0, options.Preconditions, func(current, desired store.Object) error {
+		if err := store.CopyObject(current, desired); err != nil {
+			return err
 		}
-		updated.SetResource(col.Name())
-		updated.SetScopes(m.scopes)
-		if err := store.CopyObject(updated, obj); err != nil {
-			return errors.NewInternalError(err)
-		}
-		if emptiesFinalizers {
-			// The patch emptied the last finalizer of a terminating object, so
-			// delete it at the version this write just produced.
-			conditions := append(scope,
-				bson.E{Key: "id", Value: obj.GetID()},
-				bson.E{Key: "resourceVersion", Value: updated.GetResourceVersion()},
-				bson.E{Key: "deletionTimestamp", Value: bson.M{"$ne": nil}},
-			)
-			if _, err := col.DeleteOne(ctx, conditions); err != nil {
-				return WarpMongoError(err, col, obj)
-			}
-		}
-		return nil
+		return store.ApplyPatch(desired, obj, patch)
 	})
 }
 
-// patchUpdate renders one patch as an update pipeline. Writing the generation and
-// the version inside the pipeline keeps the whole patch in one statement.
-func (m *MongoStorage) patchUpdate(decoded store.DecodedPatch, status bool) (bson.A, bool, error) {
-	owned := map[string]struct{}{"generation": {}}
-	for _, name := range store.ServerOwnedUpdateFields() {
-		owned[name] = struct{}{}
-	}
-	scopeFields := make(map[string]struct{}, len(m.scopes))
-	for _, scope := range m.scopes {
-		scopeFields[store.ScopeResourceToFieldName(scope.Resource)] = struct{}{}
-	}
-	patched := make(map[string]any, len(decoded.Fields))
-	for _, field := range decoded.Fields {
-		patched[field.Column] = nil
-	}
-	business := store.ObjectBusinessFields(patched)
-	set := bson.D{}
-	unset := bson.A{}
-	changed := bson.A{}
-	emptiesFinalizers := false
-	for _, field := range decoded.Fields {
-		if _, skip := owned[field.Column]; skip {
-			continue
-		}
-		if _, skip := scopeFields[field.Column]; skip {
-			continue
-		}
-		// A normal write keeps the stored status; the status subresource writes
-		// nothing else.
-		if status != (field.Column == "status") {
-			continue
-		}
-		path, err := documentPath(field.Column, field.Path)
-		if err != nil {
-			return nil, false, err
-		}
-		// A copy or move reads another field of the same document; every other
-		// value is a literal.
-		value := any(bson.D{{Key: "$literal", Value: field.Value}})
-		if len(field.FromPath) > 0 {
-			from, err := documentPath(field.FromPath[0], field.FromPath[1:])
-			if err != nil {
-				return nil, false, err
-			}
-			value = "$" + from
-		}
-		if field.Remove {
-			unset = append(unset, path)
-		} else {
-			set = append(set, bson.E{Key: path, Value: value})
-		}
-		if _, ok := business[field.Column]; ok {
-			// Removing a value changes the object only when it was present.
-			previous := value
-			if field.Remove {
-				previous = nil
-			}
-			changed = append(changed, bson.D{{Key: "$ne", Value: bson.A{"$" + path, previous}}})
-		}
-		if field.Column == "finalizers" && field.EmptiesValue() {
-			emptiesFinalizers = true
-		}
-	}
-	if len(changed) > 0 {
-		set = append(set, bson.E{Key: "generation", Value: bson.D{{Key: "$add", Value: bson.A{
-			"$generation",
-			bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$or", Value: changed}}, 1, 0}}},
-		}}}})
-	}
-	set = append(set, bson.E{Key: "resourceVersion", Value: bson.D{{Key: "$add", Value: bson.A{"$resourceVersion", 1}}}})
-	pipeline := bson.A{bson.D{{Key: "$set", Value: set}}}
-	if len(unset) > 0 {
-		pipeline = append(pipeline, bson.D{{Key: "$unset", Value: unset}})
-	}
-	return pipeline, emptiesFinalizers, nil
-}
-
-// documentPath renders a field path. A segment that carries a dot or starts with
-// a dollar cannot be addressed as a document path.
-func documentPath(column string, path []string) (string, error) {
-	segments := append([]string{column}, path...)
-	for _, segment := range segments {
-		if strings.Contains(segment, ".") || strings.HasPrefix(segment, "$") {
-			return "", errors.NewUnsupported(fmt.Sprintf("field %q cannot be addressed as a document path", segment))
-		}
-	}
-	return strings.Join(segments, "."), nil
-}
-
-// patchConditions renders the conditions a patch write must satisfy: the
-// caller's preconditions, the patch's own version and its tests.
-func patchConditions(decoded store.DecodedPatch, preconditions *store.Preconditions) (bson.D, error) {
-	conditions := bson.D{}
-	if preconditions != nil {
-		if preconditions.UID != nil {
-			conditions = append(conditions, bson.E{Key: "uid", Value: *preconditions.UID})
-		}
-		if preconditions.ResourceVersion != nil {
-			conditions = append(conditions, bson.E{Key: "resourceVersion", Value: *preconditions.ResourceVersion})
-		}
-	}
-	if decoded.Version != 0 {
-		conditions = append(conditions, bson.E{Key: "resourceVersion", Value: decoded.Version})
-	}
-	if len(decoded.Tests) > 0 {
-		tests := make(bson.A, 0, len(decoded.Tests))
-		for _, test := range decoded.Tests {
-			path, err := documentPath(test.Path[0], test.Path[1:])
-			if err != nil {
-				return nil, err
-			}
-			tests = append(tests, bson.D{{Key: "$eq", Value: bson.A{"$" + path, bson.D{{Key: "$literal", Value: test.Value}}}}})
-		}
-		conditions = append(conditions, bson.E{Key: "$expr", Value: bson.D{{Key: "$and", Value: tests}}})
-	}
-	return conditions, nil
-}
-
 // PatchBatch implements store.Store.
-func (m *MongoStorage) PatchBatch(ctx context.Context, obj store.ObjectList, patch store.PatchBatch, opts ...store.PatchBatchOption) error {
+func (m *MongoStorage) PatchBatch(ctx context.Context, list store.ObjectList, patch store.PatchBatch, opts ...store.PatchBatchOption) error {
 	options := store.ApplyPatchBatchOptions(opts)
-	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
+	if options.DryRun {
+		return errors.NewUnsupported("store does not support dry-run")
+	}
+	_, newItem, err := store.NewItemFuncFromList(list)
+	if err != nil {
 		return err
 	}
-	return m.on(ctx, obj, false, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
-		filter = ConditionsMatch(filter, options.LabelRequirements, options.FieldRequirements, "")
-		update, err := convertBatchPatch(patch, []string{"creator", "creationTimestamp", "resourceVersion", "status", "generation", "scopes"}, nil)
+	single := store.RawPatch(patch.Type(), patch.Data())
+	if _, err := store.DecodePatch(single, newItem()); err != nil {
+		return err
+	}
+	if err := m.List(ctx, list, store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...)); err != nil {
+		return err
+	}
+	return store.ForEachItem(list, func(item store.Object) error {
+		uid := item.GetUID()
+		err := m.Patch(ctx, item, single, store.WithPreconditions(store.Preconditions{UID: &uid}), store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...))
 		if err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
 			return err
-		}
-		update = append(update, bson.E{Key: "$inc", Value: bson.D{{Key: "resourceVersion", Value: 1}}})
-		m.core.logger.V(5).
-			Info("batch patch", "collection", col.Name(), "filter", filter, "update", update)
-		if _, err := col.UpdateMany(ctx, filter, update); err != nil {
-			return ConvetMongoListError(err, col)
 		}
 		return nil
 	})
@@ -740,9 +584,15 @@ func (m *MongoStorage) List(ctx context.Context, list store.ObjectList, opts ...
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	if options.Continue != nil {
-		return errors.NewUnsupported("MongoDB store does not support cursor pagination")
+	resource, err := store.GetResource(list)
+	if err != nil {
+		return err
 	}
+	page, err := store.PrepareListPage(resource, m.scopes, options)
+	if err != nil {
+		return err
+	}
+	options = page.Options
 
 	// if projection is empty, set projection from list object
 	// currently, we don't use this feature
@@ -755,25 +605,21 @@ func (m *MongoStorage) List(ctx context.Context, list store.ObjectList, opts ...
 			return ConvetMongoListError(err, col)
 		}
 		defer cur.Close(ctx)
-		if cur.Next(ctx) {
-			if err := cur.Decode(list); err != nil {
-				return ConvetMongoListError(err, col)
-			}
+		items, err := store.GetItemsPtr(list)
+		if err != nil {
+			return err
 		}
-		// set empty list if no items instead of nil
+		if err := cur.All(ctx, items); err != nil {
+			return ConvetMongoListError(err, col)
+		}
 		setEmptyItemsIfNil(list)
-		total := 0
-		if decodedTotal := list.GetTotal(); decodedTotal != nil {
-			total = *decodedTotal
-		}
-		store.SetWindowListMetadata(list, total)
 
 		// set resource for each item
 		store.ForEachItem(list, func(item store.Object) error {
 			item.SetResource(col.Name())
 			return nil
 		})
-		return nil
+		return page.Finish(list)
 	})
 }
 
@@ -826,20 +672,7 @@ func listPipeline(match bson.D, pre []any, opts store.ListOptions, fields []stri
 	}
 	// post conditions
 	pipeline = append(pipeline, post...)
-	// facet
-	pipeline = append(pipeline, bson.M{
-		"$facet": bson.M{
-			"items": itemspipeline,
-			"total": bson.A{bson.M{"$count": "count"}},
-		},
-	})
-	// final project
-	pipeline = append(pipeline, bson.M{
-		"$project": bson.M{
-			"items": 1,
-			"total": bson.M{"$arrayElemAt": bson.A{"$total.count", 0}},
-		},
-	})
+	pipeline = append(pipeline, itemspipeline...)
 	return pipeline
 }
 
@@ -1076,39 +909,6 @@ func escapeRegex(input string) string {
 	return escapeRegexReplacer.Replace(input)
 }
 
-func convertBatchPatch(patch store.PatchBatch, excludes []string, includes []string) (bson.D, error) {
-	data := patch.Data()
-	patchtype := patch.Type()
-	return patchToMongoUpdate(patchtype, data, excludes, includes)
-}
-
-func patchToMongoUpdate(patchtype store.PatchType, data []byte, excludes []string, includes []string) (bson.D, error) {
-	switch patchtype {
-	case store.PatchTypeMergePatch:
-		patchmap := map[string]any{}
-		if err := json.Unmarshal(data, &patchmap); err != nil {
-			return nil, errors.NewBadRequest("invalid patch data")
-		}
-		update, err := MergePatchToBsonUpdate(patchmap, excludes, includes)
-		if err != nil {
-			return nil, errors.NewBadRequest(fmt.Sprintf("invalid patch data: %v", err))
-		}
-		return update, nil
-	case store.PatchTypeJSONPatch:
-		patchlist := []map[string]any{}
-		if err := json.Unmarshal(data, &patchlist); err != nil {
-			return nil, errors.NewBadRequest("invalid patch data")
-		}
-		update, err := JsonPatchToBsonUpdate(patchlist, excludes, includes)
-		if err != nil {
-			return nil, errors.NewBadRequest(fmt.Sprintf("invalid patch data: %v", err))
-		}
-		return update, nil
-	default:
-		return nil, errors.NewBadRequest(fmt.Sprintf("invalid patch type: %s", patchtype))
-	}
-}
-
 func WarpMongoError(err error, col *mongo.Collection, obj store.Object) error {
 	if err != nil {
 		if obj == nil {
@@ -1155,9 +955,17 @@ func (m *MongoStorageStatus) Patch(ctx context.Context, obj store.Object, patch 
 }
 
 // Update implements StatusStorage.
-func (m *MongoStorageStatus) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (m *MongoStorageStatus) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	options := store.ApplyUpdateOptions(opts)
-	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, true, obj.GetResourceVersion(), func(current, desired store.Object) error {
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("MongoDB store does not support dry-run")
+	}
+	if options.TTL != 0 {
+		return errors.NewUnsupported("MongoDB store does not support TTL")
+	}
+	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, true, obj.GetResourceVersion(), nil, func(current, desired store.Object) error {
 		return store.CopyObject(obj, desired)
 	})
 }
@@ -1169,6 +977,7 @@ func (m *MongoStorage) replace(
 	fieldRequirements store.Requirements,
 	status bool,
 	requestedVersion int64,
+	preconditions *store.Preconditions,
 	change func(current, desired store.Object) error,
 ) error {
 	if obj.GetID() == "" {
@@ -1179,49 +988,60 @@ func (m *MongoStorage) replace(
 	}
 	return m.on(ctx, obj, false, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
 		filter = append(filter, bson.E{Key: "id", Value: obj.GetID()})
-		filter = ConditionsMatch(filter, labelRequirements, fieldRequirements, "")
-		current := store.NewObject(obj)
-		found := col.FindOne(ctx, filter)
-		if err := found.Decode(current); err != nil {
-			return WarpMongoError(err, col, obj)
-		}
-		current.SetResource(col.Name())
-		current.SetScopes(slices.Clone(m.scopes))
-		if requestedVersion != 0 && requestedVersion != current.GetResourceVersion() {
-			return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("resourceVersion %d does not match", requestedVersion))
-		}
-		desired := store.NewObject(obj)
-		if err := change(current, desired); err != nil {
-			return err
-		}
-		completeDeletion, err := store.PrepareObjectForUpdate(current, desired, status)
-		if err != nil {
-			return errors.NewInternalError(err)
-		}
-		versionFilter := append(slices.Clone(filter), bson.E{Key: "resourceVersion", Value: current.GetResourceVersion()})
-		if completeDeletion {
-			result, err := col.DeleteOne(ctx, versionFilter)
+		// Retry only the internal CAS; caller conditions are checked afresh.
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current := store.NewObject(obj)
+			found := col.FindOne(ctx, filter)
+			if err := found.Decode(current); err != nil {
+				return WarpMongoError(err, col, obj)
+			}
+			current.SetResource(col.Name())
+			current.SetScopes(slices.Clone(m.scopes))
+			if requestedVersion != 0 && requestedVersion != current.GetResourceVersion() {
+				return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("resourceVersion %d does not match", requestedVersion))
+			}
+			if err := store.ValidatePreconditions(current, preconditions); err != nil {
+				return err
+			}
+			if err := store.ValidateDeleteRequirements(current, labelRequirements, fieldRequirements); err != nil {
+				return err
+			}
+			desired := store.NewObject(obj)
+			if err := change(current, desired); err != nil {
+				return err
+			}
+			completeDeletion, err := m.core.schema.PrepareObjectForUpdate(current, desired, status)
+			if err != nil {
+				return err
+			}
+			versionFilter := append(slices.Clone(filter), bson.E{Key: "resourceVersion", Value: current.GetResourceVersion()}, bson.E{Key: "uid", Value: current.GetUID()})
+			if completeDeletion {
+				result, err := col.DeleteOne(ctx, versionFilter)
+				if err != nil {
+					return WarpMongoError(err, col, obj)
+				}
+				if result.DeletedCount == 0 {
+					continue
+				}
+				return store.CopyObject(desired, obj)
+			}
+			desired.SetResourceVersion(current.GetResourceVersion() + 1)
+			data, err := m.objectDocument(desired)
+			if err != nil {
+				return err
+			}
+			result, err := col.ReplaceOne(ctx, versionFilter, data)
 			if err != nil {
 				return WarpMongoError(err, col, obj)
 			}
-			if result.DeletedCount == 0 {
-				return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("object changed during update"))
+			if result.MatchedCount == 0 {
+				continue
 			}
 			return store.CopyObject(desired, obj)
 		}
-		desired.SetResourceVersion(current.GetResourceVersion() + 1)
-		data, err := m.objectDocument(desired)
-		if err != nil {
-			return err
-		}
-		result, err := col.ReplaceOne(ctx, versionFilter, data)
-		if err != nil {
-			return WarpMongoError(err, col, obj)
-		}
-		if result.MatchedCount == 0 {
-			return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("object changed during update"))
-		}
-		return store.CopyObject(desired, obj)
 	})
 }
 
@@ -1279,91 +1099,6 @@ func listToBsonD(list []string) bson.D {
 		d = append(d, bson.E{Key: s, Value: 1})
 	}
 	return d
-}
-
-var jsonPatchUnescape = strings.NewReplacer("~1", "/", "~0", "~")
-
-func matchFieldFunc(list []string, s string) bool {
-	return slices.ContainsFunc(list, func(l string) bool {
-		return l == s || strings.HasPrefix(s+".", l)
-	})
-}
-
-func JsonPatchToBsonUpdate(patches []map[string]any, excludes []string, includes []string) (bson.D, error) {
-	update := bson.D{}
-
-	for _, patch := range patches {
-		pathval, opval, value := patch["path"], patch["op"], patch["value"]
-		path, ok := pathval.(string)
-		if !ok || path == "" {
-			return nil, fmt.Errorf("invalid patch path: %v", pathval)
-		}
-		op, ok := opval.(string)
-		if !ok || op == "" {
-			return nil, fmt.Errorf("invalid patch op: %v", opval)
-		}
-		if path[0] == '/' {
-			path = path[1:]
-		}
-		bsonpath := jsonPatchUnescape.Replace(path)
-
-		// filter fields
-		if matchFieldFunc(excludes, bsonpath) ||
-			len(includes) > 0 && !matchFieldFunc(includes, bsonpath) {
-			continue
-		}
-		switch op {
-		case "add":
-			lastElement := path
-			if index := strings.LastIndex(path, "/"); index > 0 {
-				lastElement = path[index+1:]
-			}
-			if _, err := strconv.ParseInt(lastElement, 10, 64); err != nil {
-				if lastElement == "-" {
-					update = append(update, bson.E{Key: "$push", Value: bson.D{{Key: bsonpath, Value: value}}})
-				} else {
-					update = append(update, bson.E{Key: "$set", Value: bson.D{{Key: bsonpath, Value: value}}})
-				}
-				continue
-			}
-			update = append(update, bson.E{Key: "$push", Value: bson.D{{Key: bsonpath, Value: bson.D{{Key: "$each", Value: bson.A{value}}}}}})
-		case "remove":
-			update = append(update, bson.E{Key: "$unset", Value: bson.D{{Key: bsonpath, Value: ""}}})
-		case "replace":
-			update = append(update, bson.E{Key: "$set", Value: bson.D{{Key: bsonpath, Value: value}}})
-		default:
-			return nil, fmt.Errorf("invalid patch op: %v", op)
-		}
-	}
-	return update, nil
-}
-
-// MergePatchToBsonUpdate converts a map to a bson.D for use in a merge patch.
-// e.g. {"a": 1, "b": {"c": 2}} -> bson.D{{"a", 1}, {"b.c", 2}}
-func MergePatchToBsonUpdate(data map[string]any, excludes []string, includes []string) (bson.D, error) {
-	d, err := FlattenData(data, -1, excludes, includes)
-	if err != nil {
-		return nil, err
-	}
-	return bson.D{{Key: "$set", Value: d}}, nil
-}
-
-func FlattenData(data any, depth int, excludes []string, includes []string) (bson.D, error) {
-	into := bson.D{}
-	err := libreflect.FlattenStruct("", depth, reflect.ValueOf(data), func(name string, v reflect.Value) error {
-		name = strings.TrimPrefix(name, ".")
-		if matchFieldFunc(excludes, name) || len(includes) > 0 && !matchFieldFunc(includes, name) {
-			return nil
-		}
-		// case of any type but nil value
-		if !v.IsValid() {
-			into = append(into, bson.E{Key: name})
-		} else {
-			into = append(into, bson.E{Key: name, Value: v.Interface()})
-		}
-		return nil
-	})
-	return into, err
 }
 
 // SetScopesFields sets the scope's as fields in the data map.

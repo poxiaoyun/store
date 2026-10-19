@@ -30,11 +30,13 @@ func GetResource(obj any) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		t = reflect.TypeOf(itemsPointer).Elem().Elem()
+		t = reflect.TypeOf(itemsPointer).
+			Elem().
+			Elem()
 		for t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
-		if val, ok := reflect.New(t).Interface().(ResourceName); ok {
+		if val, ok := reflect.TypeAssert[ResourceName](reflect.New(t)); ok {
 			return val.ResourceName(), nil
 		}
 	}
@@ -63,8 +65,8 @@ func SimpleNameToPlural(name string) string {
 	if strings.HasSuffix(name, "s") {
 		return name
 	}
-	if strings.HasSuffix(name, "y") {
-		return strings.TrimSuffix(name, "y") + "ies"
+	if before, ok := strings.CutSuffix(name, "y"); ok {
+		return before + "ies"
 	}
 	return strings.ToLower(name) + "s"
 }

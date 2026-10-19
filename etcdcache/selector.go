@@ -11,7 +11,7 @@ import (
 	"k8s.io/apiserver/pkg/storage"
 	commonerrors "xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/selector"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 func ConvertPredicate(l store.Requirements, f store.Requirements) (storage.SelectionPredicate, error) {
@@ -70,7 +70,8 @@ func (s requirementLabelSelector) Add(requirements ...labels.Requirement) labels
 		result.requirements = append(result.requirements, selector.Requirement{
 			Key:      requirement.Key(),
 			Operator: selector.Operator(requirement.Operator()),
-			Values:   store.StringsToAny(requirement.Values().List()),
+			Values: store.StringsToAny(requirement.Values().
+				List()),
 		})
 	}
 	return result

@@ -40,6 +40,9 @@ type ResourceSchema struct {
 	Object    Object
 	ScopeKeys []string
 	Indexes   []Index
+	// GenerationFields are business field paths whose changes advance Generation.
+	// An empty declaration leaves Generation at its initial value.
+	GenerationFields []string
 	// FieldSpecs declare per-field storage attributes. A name must be unique
 	// and must match a field of Object, so a declared attribute can never be
 	// silently ignored.
@@ -66,7 +69,9 @@ func (s *Schema) Register(obj Object, definition ResourceSchema) error {
 	if s == nil {
 		return fmt.Errorf("schema is nil")
 	}
-	if obj == nil || reflect.ValueOf(obj).Kind() == reflect.Ptr && reflect.ValueOf(obj).IsNil() {
+	if obj == nil || reflect.ValueOf(obj).
+		Kind() == reflect.Ptr && reflect.ValueOf(obj).
+		IsNil() {
 		return fmt.Errorf("object is nil")
 	}
 	resource, err := GetResource(obj)
@@ -126,9 +131,12 @@ func (s *Schema) NewObject(resource string) (Object, error) {
 	typeOf := reflect.TypeOf(definition.Object)
 	var object Object
 	if typeOf.Kind() == reflect.Ptr {
-		object = reflect.New(typeOf.Elem()).Interface().(Object)
+		object = reflect.New(typeOf.Elem()).
+			Interface().(Object)
 	} else {
-		object = reflect.New(typeOf).Elem().Interface().(Object)
+		object = reflect.New(typeOf).
+			Elem().
+			Interface().(Object)
 	}
 	object.SetResource(resource)
 	return object, nil
@@ -155,6 +163,20 @@ func (s *Schema) Clone() (*Schema, error) {
 }
 
 func normalizeResourceSchema(resource string, definition ResourceSchema) (ResourceSchema, error) {
+	definition.GenerationFields = slices.Clone(definition.GenerationFields)
+	seenGeneration := map[string]bool{}
+	for _, field := range definition.GenerationFields {
+		head, _, _ := strings.Cut(field, ".")
+		if !fieldPathPattern.MatchString(field) || head == "status" || slices.Contains(objectMetaFields, head) || seenGeneration[field] {
+			return ResourceSchema{}, fmt.Errorf("resource %q has invalid Generation field %q", resource, field)
+		}
+		seenGeneration[field] = true
+		if _, dynamic := definition.Object.(*Unstructured); !dynamic {
+			if !hasSchemaField(reflect.TypeOf(definition.Object), strings.Split(field, ".")) {
+				return ResourceSchema{}, fmt.Errorf("resource %q tracks unknown field %q", resource, field)
+			}
+		}
+	}
 	definition.ScopeKeys = append([]string(nil), definition.ScopeKeys...)
 	seenScopeKeys := map[string]struct{}{}
 	for i, field := range definition.ScopeKeys {
@@ -251,12 +273,51 @@ func normalizeResourceSchema(resource string, definition ResourceSchema) (Resour
 	return definition, nil
 }
 
+func hasSchemaField(t reflect.Type, path []string) bool {
+	if len(path) == 0 {
+		return true
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Map {
+		return hasSchemaField(t.Elem(), path[1:])
+	}
+	if t.Kind() == reflect.Interface {
+		return true
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := range t.NumField() {
+		field := t.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "-" || !field.IsExported() {
+			continue
+		}
+		if field.Anonymous && name == "" {
+			if hasSchemaField(field.Type, path) {
+				return true
+			}
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		if name == path[0] {
+			return hasSchemaField(field.Type, path[1:])
+		}
+	}
+	return false
+}
+
 func cloneResourceSchema(definition ResourceSchema) ResourceSchema {
 	clone := ResourceSchema{
-		Object:     definition.Object,
-		ScopeKeys:  append([]string(nil), definition.ScopeKeys...),
-		FieldSpecs: append([]FieldSpec(nil), definition.FieldSpecs...),
-		Indexes:    make([]Index, len(definition.Indexes)),
+		GenerationFields: slices.Clone(definition.GenerationFields),
+		Object:           definition.Object,
+		ScopeKeys:        append([]string(nil), definition.ScopeKeys...),
+		FieldSpecs:       append([]FieldSpec(nil), definition.FieldSpecs...),
+		Indexes:          make([]Index, len(definition.Indexes)),
 	}
 	for i, index := range definition.Indexes {
 		clone.Indexes[i] = index

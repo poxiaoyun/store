@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apiserver/pkg/storage/etcd3/testserver"
 	"k8s.io/utils/ptr"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/common/selector"
+	"xiaoshiai.cn/store"
 )
 
 func TestEtcdStore_Watch(t *testing.T) {
@@ -36,16 +38,25 @@ func TestEtcdStore_Watch(t *testing.T) {
 	}
 	defer w.Stop()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The initial snapshot is established at the bookmark, not at Watch return.
+	events := receiveEvents(ctx, 3, w)
+	if len(events) != 3 || events[2].Type != store.WatchEventBookmark {
+		t.Fatalf("initial events = %#v", events)
+	}
 	obj2changed := *obj2
 	obj2changed.Spec.Replicas = ptr.To(int32(2))
 	if err := etcdStore.Update(ctx, &obj2changed); err != nil {
 		t.Fatalf("failed to update object: %v", err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	events := receiveEvents(ctx, 4, w)
+	if err := etcdStore.Get(ctx, obj2changed.ID, &obj2changed); err != nil {
+		t.Fatal(err)
+	}
+	events = append(events, receiveEvents(ctx, 1, w)...)
+	if len(events) != 4 {
+		t.Fatalf("received %d events, want initial snapshot and one update", len(events))
+	}
 
 	expected := []store.WatchEvent{
 		{Type: store.WatchEventCreate, Object: obj},
@@ -76,6 +87,58 @@ func receiveEvents(ctx context.Context, max int, w store.Watcher) []store.WatchE
 			}
 		case <-ctx.Done():
 			return events
+		}
+	}
+}
+
+func TestWatchAppliesUnindexedFieldRequirements(t *testing.T) {
+	client := testserver.RunEtcd(t, nil)
+	schema := store.NewSchema()
+	if err := schema.Register(&indexedObject{}, store.ResourceSchema{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	storage, err := NewEtcdStoreFromClient(client, schema, "/test")
+	if err != nil {
+		t.Fatalf("NewEtcdStoreFromClient() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, object := range []*indexedObject{
+		{ObjectMeta: store.ObjectMeta{ID: "one"}, Email: "one@example.com"},
+		{ObjectMeta: store.ObjectMeta{ID: "two"}, Email: "two@example.com"},
+	} {
+		if err := storage.Create(ctx, object); err != nil {
+			t.Fatalf("Create(%s) error = %v", object.ID, err)
+		}
+	}
+	watcher, err := storage.Watch(ctx, &store.List[indexedObject]{},
+		store.WithSendInitialEvents(),
+		store.WithFieldRequirements(selector.Requirement{
+			Key: "email", Operator: selector.Equals, Values: []any{"two@example.com"},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	defer watcher.Stop()
+	for {
+		select {
+		case event, ok := <-watcher.Events():
+			if !ok {
+				t.Fatal("watch events closed before matching event")
+			}
+			if event.Error != nil {
+				t.Fatalf("watch event error = %v", event.Error)
+			}
+			if event.Object == nil {
+				continue
+			}
+			if event.Object.GetID() != "two" {
+				t.Fatalf("watch event ID = %q, want two", event.Object.GetID())
+			}
+			return
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for matching watch event")
 		}
 	}
 }

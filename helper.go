@@ -32,12 +32,12 @@ func ObjectReferenceFrom(obj Object) ObjectReference {
 }
 
 func (r ObjectReference) String() string {
-	key := ""
+	var key strings.Builder
 	for _, scope := range r.Scopes {
-		key += "/" + scope.Resource + "/" + scope.Name
+		key.WriteString("/" + scope.Resource + "/" + scope.Name)
 	}
-	key += "/" + r.ID
-	return key
+	key.WriteString("/" + r.ID)
+	return key.String()
 }
 
 func (r ObjectReference) Equals(other ObjectReference) bool {
@@ -65,13 +65,13 @@ func (r ResourcedObjectReference) EqualsWithUID(other ResourcedObjectReference) 
 }
 
 func (r ResourcedObjectReference) String() string {
-	key := ""
+	var key strings.Builder
 	for _, scope := range r.Scopes {
-		key += "/" + scope.Resource + "/" + scope.Name
+		key.WriteString("/" + scope.Resource + "/" + scope.Name)
 	}
-	key += "/" + r.Resource
-	key += "/" + r.ID
-	return key
+	key.WriteString("/" + r.Resource)
+	key.WriteString("/" + r.ID)
+	return key.String()
 }
 
 func ResourcedObjectReferenceFrom(obj Object) ResourcedObjectReference {
@@ -84,13 +84,13 @@ func ResourcedObjectReferenceFrom(obj Object) ResourcedObjectReference {
 }
 
 func ObjectIdentity(obj Object) string {
-	key := ""
+	var key strings.Builder
 	for _, scope := range obj.GetScopes() {
-		key += "/" + scope.Resource + "/" + scope.Name
+		key.WriteString("/" + scope.Resource + "/" + scope.Name)
 	}
-	key += "/" + obj.GetResource()
-	key += "/" + obj.GetID()
-	return key
+	key.WriteString("/" + obj.GetResource())
+	key.WriteString("/" + obj.GetID())
+	return key.String()
 }
 
 func ScopesEquals(a, b []Scope) bool {
@@ -190,7 +190,7 @@ func IgnoreAlreadyExists(err error) error {
 	return err
 }
 
-var objcType = reflect.TypeOf((*Object)(nil)).Elem()
+var objcType = reflect.TypeFor[Object]()
 
 // NewItemFuncFromList returns the reflect.Value of the Items field of the list and a function to create a new item.
 func NewItemFuncFromList(list ObjectList) (reflect.Value, func() Object, error) {
@@ -202,15 +202,18 @@ func NewItemFuncFromList(list ObjectList) (reflect.Value, func() Object, error) 
 	if err != nil || v.Kind() != reflect.Slice {
 		return reflect.Value{}, nil, errors.NewBadRequest(fmt.Sprintf("object Items field must be a slice: %v", err))
 	}
-	elem := v.Type().Elem()
+	elem := v.Type().
+		Elem()
 	if elem.Kind() == reflect.Ptr {
 		return reflect.Value{}, nil, errors.NewBadRequest("object Items field must be a slice of non-pointer")
 	}
-	if !reflect.PointerTo(elem).Implements(objcType) {
+	if !reflect.PointerTo(elem).
+		Implements(objcType) {
 		return reflect.Value{}, nil, errors.NewBadRequest("object Items field must be a slice of store.Object type")
 	}
 	newItemFunc := func() Object {
-		return reflect.New(elem).Interface().(Object)
+		return reflect.New(elem).
+			Interface().(Object)
 	}
 	return v, newItemFunc, nil
 }
@@ -235,20 +238,24 @@ func getItemsPtr(list any) (any, error) {
 	}
 	switch items.Kind() {
 	case reflect.Interface, reflect.Pointer:
-		target := reflect.TypeOf(items.Interface()).Elem()
+		target := reflect.TypeOf(items.Interface()).
+			Elem()
 		if target.Kind() != reflect.Slice {
 			return nil, stderrors.New("items field is not a slice")
 		}
 		return items.Interface(), nil
 	case reflect.Slice:
-		return items.Addr().Interface(), nil
+		return items.Addr().
+			Interface(), nil
 	default:
 		return nil, stderrors.New("items field is not a slice")
 	}
 }
 
 func NewObject(obj Object) Object {
-	return reflect.New(reflect.TypeOf(obj).Elem()).Interface().(Object)
+	return reflect.New(reflect.TypeOf(obj).
+		Elem()).
+		Interface().(Object)
 }
 
 func CreateOrUpdate(ctx context.Context, store Store, obj Object, updatefn func() error) error {
@@ -297,7 +304,7 @@ func ForEachItem(list ObjectList, fn func(Object) error) error {
 		if itemv.Kind() != reflect.Ptr {
 			itemv = itemv.Addr()
 		}
-		item, ok := itemv.Interface().(Object)
+		item, ok := reflect.TypeAssert[Object](itemv)
 		if !ok {
 			return fmt.Errorf("item is not a Object: %T", itemv.Interface())
 		}
@@ -333,7 +340,8 @@ func SortByFunc[T any](by string, getname func(T) string, gettime func(T) time.T
 			return nil
 		}
 		return func(a, b T) int {
-			if timcmp := gettime(a).Compare(gettime(b)); timcmp == 0 && getname != nil {
+			if timcmp := gettime(a).
+				Compare(gettime(b)); timcmp == 0 && getname != nil {
 				return strings.Compare(getname(a), getname(b))
 			} else {
 				return timcmp
@@ -344,7 +352,8 @@ func SortByFunc[T any](by string, getname func(T) string, gettime func(T) time.T
 			return nil
 		}
 		return func(a, b T) int {
-			if timcmp := gettime(b).Compare(gettime(a)); timcmp == 0 && getname != nil {
+			if timcmp := gettime(b).
+				Compare(gettime(a)); timcmp == 0 && getname != nil {
 				return strings.Compare(getname(a), getname(b))
 			} else {
 				return timcmp
@@ -370,7 +379,8 @@ func SortByFunc[T any](by string, getname func(T) string, gettime func(T) time.T
 }
 
 func NewTimeAsName() string {
-	return time.Now().Format("20060102150405")
+	return time.Now().
+		Format("20060102150405")
 }
 
 func StringsToAny(values []string) []any {

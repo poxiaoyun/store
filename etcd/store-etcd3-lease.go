@@ -59,12 +59,11 @@ func (l *leaseManager) GetLease(ctx context.Context, ttl int64) (clientv3.LeaseI
 	l.leaseMu.Lock()
 	defer l.leaseMu.Unlock()
 	// check if previous lease can be reused
-	reuseDurationSeconds := int64(l.leaseReuseDurationPercent * float64(ttl))
-	if reuseDurationSeconds > l.leaseReuseDurationSeconds {
-		reuseDurationSeconds = l.leaseReuseDurationSeconds
-	}
-	valid := now.Add(time.Duration(ttl) * time.Second).Before(l.prevLeaseExpirationTime)
-	sufficient := now.Add(time.Duration(ttl+reuseDurationSeconds) * time.Second).After(l.prevLeaseExpirationTime)
+	reuseDurationSeconds := min(int64(l.leaseReuseDurationPercent*float64(ttl)), l.leaseReuseDurationSeconds)
+	valid := now.Add(time.Duration(ttl) * time.Second).
+		Before(l.prevLeaseExpirationTime)
+	sufficient := now.Add(time.Duration(ttl+reuseDurationSeconds) * time.Second).
+		After(l.prevLeaseExpirationTime)
 
 	// We count all operations that happened in the same lease, regardless of success or failure.
 	if valid && sufficient && l.leaseAttachedObjectCount < l.leaseMaxAttachedObjectCount {

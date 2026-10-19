@@ -375,7 +375,7 @@ func WithDryRun() DryRunOption {
 	return DryRunOption{}
 }
 
-// OffsetOption sets the window read offset.
+// OffsetOption sets the initial query offset.
 type OffsetOption int
 
 // ApplyToList sets the skipped object count.
@@ -383,7 +383,7 @@ func (option OffsetOption) ApplyToList(options *ListOptions) {
 	options.Offset = int(option)
 }
 
-// WithOffset skips that many matching objects in a window read.
+// WithOffset skips matching objects on the initial request.
 func WithOffset(offset int) OffsetOption {
 	return OffsetOption(offset)
 }
@@ -396,8 +396,7 @@ func (option ListLimitOption) ApplyToList(options *ListOptions) {
 	options.Limit = int(option)
 }
 
-// WithLimit bounds the returned objects. In a window read it caps the objects
-// returned from WithOffset; a zero limit returns every object from that offset.
+// WithLimit bounds the returned objects; zero returns all remaining matches.
 func WithLimit(limit int) ListLimitOption {
 	return ListLimitOption(limit)
 }
@@ -413,14 +412,12 @@ type ContinueOption struct {
 
 // ApplyToList selects the cursor read and sets its bound together.
 func (option ContinueOption) ApplyToList(options *ListOptions) {
-	token := option.Token
-	options.Continue = &token
+	options.Continue = option.Token
 	options.Limit = option.Limit
 }
 
 // WithContinue selects a cursor read of at most limit objects after token. An
-// empty token selects the first batch. Use WithLimit for a bounded window read
-// that is not resumable.
+// empty token selects the first batch. WithLimit also starts a resumable query.
 func WithContinue(token string, limit int) ContinueOption {
 	return ContinueOption{Token: token, Limit: limit}
 }
@@ -438,7 +435,7 @@ func WithSort(sort string) SortOption {
 	return SortOption(sort)
 }
 
-// SearchOption sets the List search text.
+// SearchOption sets the List or Count search text.
 type SearchOption string
 
 // ApplyToList sets the search text.
@@ -446,12 +443,12 @@ func (option SearchOption) ApplyToList(options *ListOptions) {
 	options.Search = string(option)
 }
 
-// WithSearch sets the List search text.
+// WithSearch sets the List or Count search text.
 func WithSearch(search string) SearchOption {
 	return SearchOption(search)
 }
 
-// SearchFieldsOption appends fields searched by a List.
+// SearchFieldsOption appends fields searched by List or Count.
 type SearchFieldsOption []string
 
 // ApplyToList appends search fields.
@@ -459,7 +456,7 @@ func (option SearchFieldsOption) ApplyToList(options *ListOptions) {
 	options.SearchFields = append(options.SearchFields, option...)
 }
 
-// WithSearchFields appends fields searched by a List.
+// WithSearchFields appends fields searched by List or Count.
 func WithSearchFields(fields ...string) SearchFieldsOption {
 	return SearchFieldsOption(fields)
 }
@@ -649,4 +646,12 @@ func ApplyTransactionOptions(options []TransactionOption) TransactionOptions {
 		option.ApplyToTransaction(&resolved)
 	}
 	return resolved
+}
+
+// ApplyToCount sets the same search predicate used by List.
+func (option SearchOption) ApplyToCount(options *CountOptions) { options.Search = string(option) }
+
+// ApplyToCount selects the fields searched by Count.
+func (option SearchFieldsOption) ApplyToCount(options *CountOptions) {
+	options.SearchFields = append(options.SearchFields, option...)
 }

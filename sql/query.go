@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -169,6 +170,7 @@ func first(values []any) any {
 // or write.
 func (s *Storage) whereClause(q *QueryState, id string, labels, fields store.Requirements) (string, error) {
 	builder := &ConditionBuilder{}
+	builder.Add(s.scopeCondition(q))
 	for _, scope := range s.scopes {
 		field := store.ScopeResourceToFieldName(scope.Resource)
 		builder.Add(s.core.dialect.Quote(field) + " = " + q.Bind(scope.Name))
@@ -286,4 +288,18 @@ func (s *Storage) window(q *QueryState, offset, limit int) string {
 		offsetPlaceholder = q.Bind(offset)
 	}
 	return s.core.dialect.Window(limitPlaceholder, offsetPlaceholder)
+}
+
+// scopeCondition matches the complete persisted identity. Projected scope
+// columns can accelerate this predicate but cannot replace its depth or order.
+func (s *Storage) scopeCondition(q *QueryState) string {
+	column := s.core.dialect.Quote("scopes")
+	if len(s.scopes) == 0 {
+		empty := s.core.dialect.JSONValue(q.Bind("[]"))
+		null := s.core.dialect.JSONValue(q.Bind("null"))
+		return "(" + column + " IS NULL OR " + column + " = " + empty + " OR " + column + " = " + null + ")"
+	}
+	// Scope consists only of strings, so its JSON representation is infallible.
+	data, _ := json.Marshal(s.scopes)
+	return column + " = " + s.core.dialect.JSONValue(q.Bind(string(data)))
 }

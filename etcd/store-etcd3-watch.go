@@ -14,7 +14,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/log"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 const (
@@ -137,8 +137,9 @@ func (w *etcdWatcher) sendError(ctx context.Context, err error) {
 
 func (w *etcdWatcher) sendEvent(ctx context.Context, e *etcdEvent) {
 	if len(w.incomingEventChan) == cap(w.incomingEventChan) {
-		log.V(3).Info("Fast watcher, slow processing. Probably caused by slow decoding, user not receiving fast, or other processing logic",
-			"groupResource", w.resource)
+		log.V(3).
+			Info("Fast watcher, slow processing. Probably caused by slow decoding, user not receiving fast, or other processing logic",
+				"groupResource", w.resource)
 	}
 	select {
 	case w.incomingEventChan <- e:
@@ -281,8 +282,9 @@ func (w *etcdWatcher) processEvent(ctx context.Context) error {
 				continue
 			}
 			if len(w.resultChan) == outgoingEventChanSize {
-				log.V(3).Info("Fast watcher, slow processing. Probably caused by slow dispatching events to watchers",
-					"resource", w.resource)
+				log.V(3).
+					Info("Fast watcher, slow processing. Probably caused by slow dispatching events to watchers",
+						"resource", w.resource)
 			}
 			// If user couldn't receive results fast enough, we also block incoming events from watcher.
 			// Because storing events in local will cause more memory usage.
@@ -386,7 +388,8 @@ func IsCancelError(err error) bool {
 	if etcdErr, ok := err.(etcdError); ok && etcdErr.Code() == grpccodes.Canceled {
 		return true
 	}
-	if grpcErr, ok := err.(grpcError); ok && grpcErr.GRPCStatus().Code() == grpccodes.Canceled {
+	if grpcErr, ok := err.(grpcError); ok && grpcErr.GRPCStatus().
+		Code() == grpccodes.Canceled {
 		return true
 	}
 	return false

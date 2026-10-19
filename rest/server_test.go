@@ -11,6 +11,8 @@ import (
 	"xiaoshiai.cn/common/rest/api"
 	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/inmemory"
+	"xiaoshiai.cn/store/storetest"
 )
 
 type optionCaptureStore struct {
@@ -47,7 +49,7 @@ func (s *optionCaptureStore) Scope(...store.Scope) store.Store {
 func (s *optionCaptureStore) List(_ context.Context, list store.ObjectList, opts ...store.ListOption) error {
 	options := store.ApplyListOptions(opts)
 	s.listOptions = options
-	store.SetCursorListMetadata(list, "next-token")
+	list.SetContinue("next-token")
 	return nil
 }
 
@@ -73,7 +75,7 @@ func newCaptureRemoteStore(t *testing.T, underlying store.Store) *Client {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	return NewRemoteStore(serverURL, store.NewSchema())
+	return NewRemoteStore(serverURL, store.NewSchema(), store.Capabilities{})
 }
 
 type pingStore struct {
@@ -106,7 +108,7 @@ func TestRemoteStoreSchemaSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	remote := NewRemoteStore(serverURL, schema)
+	remote := NewRemoteStore(serverURL, schema, store.Capabilities{})
 	if err := schema.Register(&remoteSchemaMutationObject{}, store.ResourceSchema{}); err != nil {
 		t.Fatalf("source schema Register() error = %v", err)
 	}
@@ -119,14 +121,6 @@ func TestRemoteStoreSchemaSnapshot(t *testing.T) {
 	remoteSchema := remote.Schema()
 	if got := remoteSchema.Resources(); !reflect.DeepEqual(got, []string{"remote-schema-tests"}) {
 		t.Fatalf("Schema().Resources() = %v, want [remote-schema-tests]", got)
-	}
-}
-
-func TestRemoteStoreSelectorCapabilities(t *testing.T) {
-	remote := newCaptureRemoteStore(t, &optionCaptureStore{})
-	capabilities := remote.Capabilities()
-	if !capabilities.LabelSelector || !capabilities.FieldSelector {
-		t.Fatalf("Capabilities() = %#v, want recursive selectors", capabilities)
 	}
 }
 
@@ -147,7 +141,7 @@ func TestRemoteStoreListPassesCursor(t *testing.T) {
 	); err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if got := underlying.listOptions.Continue; got == nil || *got != "current-token" {
+	if got := underlying.listOptions.Continue; got != "current-token" {
 		t.Fatalf("ListOptions.Continue = %v, want %q", got, "current-token")
 	}
 	if got := underlying.listOptions.Limit; got != 2 {
@@ -171,9 +165,7 @@ func TestRemoteStoreListPassesCursor(t *testing.T) {
 	if got := list.Continue; got != "next-token" {
 		t.Fatalf("List.Continue = %q, want %q", got, "next-token")
 	}
-	if list.Total != nil {
-		t.Fatalf("List cursor metadata = %#v", list)
-	}
+
 }
 
 func TestRemoteStoreListPreservesWindow(t *testing.T) {
@@ -454,4 +446,39 @@ func TestRemotePatchPassesExactPreconditions(t *testing.T) {
 	if conditions == nil || conditions.ResourceVersion == nil || *conditions.ResourceVersion != 0 || conditions.UID == nil || *conditions.UID != uid {
 		t.Fatalf("Patch preconditions: %#v", conditions)
 	}
+}
+
+func TestRemoteStoreConformance(t *testing.T) {
+	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
+	storetest.Run(t, storetest.Fixture{
+		Capabilities:     capabilities,
+		Continue:         true,
+		LabelSelector:    true,
+		FieldSelector:    true,
+		Search:           true,
+		Sort:             true,
+		SubScopes:        true,
+		DeleteBatch:      true,
+		PatchBatch:       true,
+		SecondaryIndexes: true,
+		UniqueIndexes:    true,
+
+		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
+			underlying, err := inmemory.New(schema)
+			if err != nil {
+				return nil, err
+			}
+			handler := api.New().
+				Group(NewServer(underlying).
+					Group()).
+				Build()
+			server := httptest.NewServer(handler)
+			t.Cleanup(server.Close)
+			endpoint, err := url.Parse(server.URL)
+			if err != nil {
+				return nil, err
+			}
+			return NewRemoteStore(endpoint, schema, capabilities), nil
+		},
+	})
 }

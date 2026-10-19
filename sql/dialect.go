@@ -21,19 +21,25 @@ type ColumnInfo struct {
 	Type string
 }
 
-// IndexInfo describes one existing index during schema reconciliation. Columns
-// is empty when the index is built from an expression or generated column.
+// IndexInfo describes an existing index's physical key columns, excluding
+// covering columns. Expression keys have no physical column name.
 type IndexInfo struct {
-	Name    string
-	Unique  bool
+	Primary bool
 	Columns []string
 }
 
-// dialect owns every database-specific decision: identifier quoting, bind
+// Dialect owns every database-specific decision: identifier quoting, bind
 // placeholders, column types, JSON path extraction, schema introspection,
 // nested-path indexes, and error mapping. Statements are built once and bound
 // through this interface, so the store logic stays dialect-free.
 type Dialect interface {
+	// Distinct compares two scalar expressions including SQL NULL.
+	Distinct(left, right string) string
+	// MergeDocument applies a flat RFC 7396 object patch to a JSON column.
+	MergeDocument(q *QueryState, column string, patch map[string]any) string
+	// FinalizersEmpty tests whether the persisted finalizer array is empty.
+	FinalizersEmpty(column string) string
+
 	// Name reports the driver name this dialect serves.
 	Name() string
 	// Quote renders one identifier.
@@ -48,34 +54,16 @@ type Dialect interface {
 	// nested field path splits into its first segment as the column and the
 	// rest as remainingPath.
 	JSONText(column string, remainingPath []string) (string, error)
-	// NotDistinct renders a predicate that is true when left equals right,
-	// comparing NULL as one comparable value.
-	NotDistinct(left, right string) string
-	// JSONExtract renders the document value at remainingPath inside column,
-	// keeping its document type.
-	JSONExtract(column string, remainingPath []string) (string, error)
-	// Distinct renders a predicate that is true when left differs from right,
-	// comparing NULL as one comparable value rather than yielding NULL.
-	Distinct(left, right string) string
 	// JSONValue wraps a placeholder that carries JSON text so a document column
 	// accepts it.
 	JSONValue(placeholder string) string
-	// JSONSet renders an edit that writes value at remainingPath inside a JSON
-	// document column. placeholder is an already rendered bind marker.
-	JSONSet(column string, remainingPath []string, placeholder string) string
-	// JSONRemove renders an edit that removes remainingPath from a JSON
-	// document column.
-	JSONRemove(column string, remainingPath []string) string
-	// UpdateReturning renders the clause that makes an UPDATE return the written
-	// row, or the empty string when the backend cannot return it.
-	UpdateReturning() string
 	// Window renders the row window clause. A bound's placeholder is empty when
 	// that bound is not requested.
 	Window(limitPlaceholder, offsetPlaceholder string) string
 	// CreateTable renders CREATE TABLE IF NOT EXISTS for one planned table.
-	// Every non-key column is nullable, because an omitted optional field must
-	// stay absent rather than fail the insert.
-	CreateTable(table string, columns []ColumnSpec, key []string) (string, error)
+	// ID is always the primary key. Other columns are nullable so omitted
+	// optional fields stay absent rather than fail the insert.
+	CreateTable(table string, columns []ColumnSpec) (string, error)
 	// AddColumn renders ALTER TABLE ADD COLUMN for one planned column.
 	AddColumn(table string, column ColumnSpec) (string, error)
 	// IndexDDL renders the statements that create one index. An index over a
@@ -85,6 +73,9 @@ type Dialect interface {
 	Columns(ctx context.Context, db StatementExecutor, table string) (map[string]ColumnInfo, error)
 	// Indexes reads the existing index set of a table.
 	Indexes(ctx context.Context, db StatementExecutor, table string) (map[string]IndexInfo, error)
+	// ValidateIndex confirms that an existing index enforces the declared fields
+	// and uniqueness, including expressions and generated columns.
+	ValidateIndex(ctx context.Context, db StatementExecutor, table string, index store.Index) error
 	// MapError translates a driver error into a domain error.
 	MapError(err error, resource, name string) error
 	// IsRetryableConflict reports that a statement failed on a retryable
@@ -134,7 +125,8 @@ func IsTimeType(t reflect.Type) bool {
 // canonicalTime renders a timestamp in the same textual form nested JSON
 // timestamps use, so nested comparisons stay lexicographically ordered.
 func CanonicalTime(value time.Time) string {
-	return value.UTC().Format(time.RFC3339)
+	return value.UTC().
+		Format(time.RFC3339)
 }
 
 // textArg renders a requirement value for comparison against a nested JSON

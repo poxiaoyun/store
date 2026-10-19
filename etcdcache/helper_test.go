@@ -1,13 +1,10 @@
 package etcdcache
 
 import (
-	"fmt"
 	"slices"
 	"testing"
-	"time"
 
-	"k8s.io/apiserver/pkg/storage/etcd3/testserver"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 func TestSortUnstructuredListNumericScores(t *testing.T) {
@@ -23,99 +20,6 @@ func TestSortUnstructuredListNumericScores(t *testing.T) {
 	}
 	if want := []string{"high", "middle", "low"}; !slices.Equal(got, want) {
 		t.Fatalf("recommendation order = %v, want %v", got, want)
-	}
-}
-
-type numericSortObject struct {
-	store.ObjectMeta `json:",inline"`
-	Recommendation   map[string]int64  `json:"recommendation,omitempty"`
-	LatestVersion    map[string]string `json:"latestVersion,omitempty"`
-}
-
-func TestEtcdCacherNumericSortBeforePagination(t *testing.T) {
-	schema := store.NewSchema()
-	if err := schema.Register(&numericSortObject{}, store.ResourceSchema{
-		ScopeKeys: []string{"tenant"},
-		Indexes: []store.Index{
-			{Fields: []string{"recommendation.score"}},
-			{Fields: []string{"latestVersion.publicationTimestamp"}},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	storage := newTestStore(t, t.Context(), testserver.RunEtcd(t, nil), schema)
-	for _, item := range []struct {
-		tenant      string
-		id          string
-		score       int64
-		publication string
-	}{
-		{tenant: "a", id: "low", score: 10},
-		{tenant: "a", id: "high-old", score: 100, publication: "2026-09-01T00:00:00Z"},
-		{tenant: "a", id: "high-new", score: 100, publication: "2026-09-02T00:00:00Z"},
-		{tenant: "b", id: "middle", score: 90},
-		{tenant: "a", id: "zero", score: 0},
-		{tenant: "a", id: "unset", score: -1},
-	} {
-		object := &numericSortObject{
-			ObjectMeta:    store.ObjectMeta{ID: item.id},
-			LatestVersion: map[string]string{"publicationTimestamp": item.publication},
-		}
-		if item.score >= 0 {
-			object.Recommendation = map[string]int64{"score": item.score}
-		}
-		if err := storage.Scope(store.Scope{Resource: "tenants", Name: item.tenant}).Create(t.Context(), object); err != nil {
-			t.Fatal(err)
-		}
-	}
-	assertEventually(t, 5*time.Second, func() error {
-		list := &store.List[numericSortObject]{}
-		if err := storage.List(t.Context(), list, store.WithSubScopes()); err != nil {
-			return err
-		}
-		if len(list.Items) != 6 {
-			return fmt.Errorf("cache contains %d objects, want 6", len(list.Items))
-		}
-		return nil
-	})
-	const sort = "recommendation.score-,latestVersion.publicationTimestamp-,time-,tenant+,id+"
-	for _, tt := range []struct {
-		name   string
-		tenant string
-		page   int
-		want   []string
-	}{
-		{name: "first page", page: 1, want: []string{"high-new", "high-old"}},
-		{name: "second page", page: 2, want: []string{"middle", "low"}},
-		{name: "unrecommended page", page: 3, want: []string{"zero", "unset"}},
-		{name: "tenant first page", tenant: "a", page: 1, want: []string{"high-new", "high-old"}},
-		{name: "tenant second page", tenant: "a", page: 2, want: []string{"low", "zero"}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var scoped store.Store = storage
-			wantTotal := 6
-			options := []store.ListOption{store.WithPage(tt.page, 2), store.WithSort(sort)}
-			if tt.tenant == "" {
-				options = append(options, store.WithSubScopes())
-			} else {
-				scoped = storage.Scope(store.Scope{Resource: "tenants", Name: tt.tenant})
-				wantTotal = 5
-			}
-			list := &store.List[numericSortObject]{}
-			if err := scoped.List(t.Context(), list, options...); err != nil {
-				t.Fatal(err)
-			}
-			got := make([]string, len(list.Items))
-			for i, item := range list.Items {
-				got[i] = item.ID
-			}
-			if !slices.Equal(got, tt.want) {
-				t.Fatalf("page order = %v, want %v", got, tt.want)
-			}
-			if list.Total == nil || *list.Total != wantTotal {
-				t.Fatalf("total = %v, want %d", list.Total, wantTotal)
-			}
-		})
 	}
 }
 

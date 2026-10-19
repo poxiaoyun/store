@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"reflect"
@@ -43,7 +44,8 @@ func (MySQLDialect) ColumnType(field string, t reflect.Type, size int, indexed b
 		return "bigint", nil
 	case base.Kind() == reflect.Float32 || base.Kind() == reflect.Float64:
 		return "double", nil
-	case base.Kind() == reflect.Slice && base.Elem().Kind() == reflect.Uint8:
+	case base.Kind() == reflect.Slice && base.Elem().
+		Kind() == reflect.Uint8:
 		return "longblob", nil
 	case base.Kind() == reflect.Map, base.Kind() == reflect.Struct,
 		base.Kind() == reflect.Slice, base.Kind() == reflect.Array, base.Kind() == reflect.Interface:
@@ -53,7 +55,7 @@ func (MySQLDialect) ColumnType(field string, t reflect.Type, size int, indexed b
 	}
 }
 
-func (d MySQLDialect) CreateTable(table string, columns []ColumnSpec, key []string) (string, error) {
+func (d MySQLDialect) CreateTable(table string, columns []ColumnSpec) (string, error) {
 	definitions := make([]string, 0, len(columns)+1)
 	for _, column := range columns {
 		definition, err := d.columnDefinition(column)
@@ -62,13 +64,7 @@ func (d MySQLDialect) CreateTable(table string, columns []ColumnSpec, key []stri
 		}
 		definitions = append(definitions, definition)
 	}
-	if len(key) > 0 {
-		quoted := make([]string, 0, len(key))
-		for _, name := range key {
-			quoted = append(quoted, d.Quote(name))
-		}
-		definitions = append(definitions, "PRIMARY KEY ("+strings.Join(quoted, ", ")+")")
-	}
+	definitions = append(definitions, "PRIMARY KEY ("+d.Quote("id")+")")
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", d.Quote(table), strings.Join(definitions, ", ")), nil
 }
 
@@ -92,9 +88,6 @@ func (d MySQLDialect) columnDefinition(column ColumnSpec) (string, error) {
 // requested, because MySQL rejects OFFSET without LIMIT.
 const mysqlRowLimit = "18446744073709551615"
 
-// UpdateReturning returns the empty string: MySQL cannot return the written row.
-func (MySQLDialect) UpdateReturning() string { return "" }
-
 // Window renders the row window. MySQL rejects OFFSET without LIMIT.
 func (MySQLDialect) Window(limitPlaceholder, offsetPlaceholder string) string {
 	switch {
@@ -108,22 +101,6 @@ func (MySQLDialect) Window(limitPlaceholder, offsetPlaceholder string) string {
 	default:
 		return " LIMIT " + limitPlaceholder + " OFFSET " + offsetPlaceholder
 	}
-}
-
-// NotDistinct renders MySQL's null-safe equality.
-func (MySQLDialect) NotDistinct(left, right string) string {
-	return left + " <=> " + right
-}
-
-// JSONExtract renders a JSON extraction of one nested path.
-func (MySQLDialect) JSONExtract(column string, remainingPath []string) (string, error) {
-	return fmt.Sprintf("JSON_EXTRACT(%s, %s)", column, quotedLiteral(mysqlJSONPath(remainingPath))), nil
-}
-
-// Distinct renders MySQL's null-safe inequality, which negates the null-safe
-// equality operator.
-func (MySQLDialect) Distinct(left, right string) string {
-	return "NOT (" + left + " <=> " + right + ")"
 }
 
 // JSONValue casts JSON text into a JSON value.
@@ -147,14 +124,6 @@ func mysqlJSONPath(path []string) string {
 	return "$." + strings.Join(segments, ".")
 }
 
-func (d MySQLDialect) JSONSet(column string, remainingPath []string, placeholder string) string {
-	return fmt.Sprintf("JSON_SET(%s, %s, %s)", column, quotedLiteral(mysqlJSONPath(remainingPath)), placeholder)
-}
-
-func (d MySQLDialect) JSONRemove(column string, remainingPath []string) string {
-	return fmt.Sprintf("JSON_REMOVE(%s, %s)", column, quotedLiteral(mysqlJSONPath(remainingPath)))
-}
-
 func (d MySQLDialect) IndexDDL(table string, index store.Index) ([]string, error) {
 	columns := make([]string, 0, len(index.Fields))
 	statements := make([]string, 0, len(index.Fields)+1)
@@ -165,10 +134,7 @@ func (d MySQLDialect) IndexDDL(table string, index store.Index) ([]string, error
 		}
 		path := JSONPath(field)
 		column := GeneratedColumnName(table, path)
-		expression, err := d.JSONText(d.Quote(path[0]), path[1:])
-		if err != nil {
-			return nil, err
-		}
+		expression := d.indexExpression(path)
 		// A unique index must materialize the expression. MySQL indexes a
 		// stored generated column; plain secondary indexes accept a virtual one.
 		kind := "VIRTUAL"
@@ -213,9 +179,59 @@ WHERE table_schema = DATABASE() AND table_name = ?`, table)
 	return result, rows.Err()
 }
 
+// indexExpression uses an explicit character set so catalog comparison does
+// not depend on the session's default character set.
+func (d MySQLDialect) indexExpression(path []string) string {
+	return "json_unquote(json_extract(" + d.Quote(path[0]) + ",_utf8mb4" + quotedLiteral(mysqlJSONPath(path[1:])) + "))"
+}
+
+func (d MySQLDialect) ValidateIndex(ctx context.Context, db StatementExecutor, table string, index store.Index) error {
+	rows, err := db.QueryContext(ctx, `
+SELECT s.NON_UNIQUE, s.COLUMN_NAME, c.GENERATION_EXPRESSION, s.SUB_PART
+FROM information_schema.statistics s
+LEFT JOIN information_schema.columns c
+  ON c.TABLE_SCHEMA = s.TABLE_SCHEMA AND c.TABLE_NAME = s.TABLE_NAME AND c.COLUMN_NAME = s.COLUMN_NAME
+WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.INDEX_NAME = ?
+ORDER BY s.SEQ_IN_INDEX`, table, index.Name)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	position := 0
+	for rows.Next() {
+		var nonUnique int
+		var column, expression sql.NullString
+		var prefix sql.NullInt64
+		if err := rows.Scan(&nonUnique, &column, &expression, &prefix); err != nil {
+			return err
+		}
+		if position >= len(index.Fields) || (nonUnique == 0) != index.Unique || prefix.Valid {
+			return fmt.Errorf("table %q index %q conflicts with the declared definition", table, index.Name)
+		}
+		field := index.Fields[position]
+		matches := column.String == field && expression.String == ""
+		if IsNestedField(field) {
+			// MySQL escapes quotes in INFORMATION_SCHEMA's expression text.
+			expected := strings.ReplaceAll(d.indexExpression(JSONPath(field)), "'", `\'`)
+			matches = expression.String == expected
+		}
+		if !matches {
+			return fmt.Errorf("table %q index %q conflicts with declared field %q", table, index.Name, field)
+		}
+		position++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if position != len(index.Fields) {
+		return fmt.Errorf("table %q index %q conflicts with the declared fields", table, index.Name)
+	}
+	return nil
+}
+
 func (MySQLDialect) Indexes(ctx context.Context, db StatementExecutor, table string) (map[string]IndexInfo, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME
+SELECT INDEX_NAME, COLUMN_NAME
 FROM information_schema.statistics
 WHERE table_schema = DATABASE() AND table_name = ?
 ORDER BY INDEX_NAME, SEQ_IN_INDEX`, table)
@@ -226,16 +242,14 @@ ORDER BY INDEX_NAME, SEQ_IN_INDEX`, table)
 	result := map[string]IndexInfo{}
 	for rows.Next() {
 		var (
-			name      string
-			nonUnique int
-			column    sql.NullString
+			name   string
+			column sql.NullString
 		)
-		if err := rows.Scan(&name, &nonUnique, &column); err != nil {
+		if err := rows.Scan(&name, &column); err != nil {
 			return nil, err
 		}
 		info := result[name]
-		info.Name = name
-		info.Unique = nonUnique == 0
+		info.Primary = name == "PRIMARY"
 		if column.Valid {
 			info.Columns = append(info.Columns, column.String)
 		}
@@ -274,3 +288,14 @@ func (MySQLDialect) IsRetryableConflict(err error) bool {
 }
 
 // ---------------------------------------------------------------------------
+
+func (MySQLDialect) Distinct(left, right string) string {
+	return "NOT (BINARY " + left + " <=> BINARY " + right + ")"
+}
+func (MySQLDialect) MergeDocument(q *QueryState, column string, patch map[string]any) string {
+	data, _ := json.Marshal(patch)
+	return "JSON_MERGE_PATCH(COALESCE(" + column + ", JSON_OBJECT()), CAST(" + q.Bind(string(data)) + " AS JSON))"
+}
+func (MySQLDialect) FinalizersEmpty(column string) string {
+	return "(" + column + " IS NULL OR JSON_TYPE(" + column + ") = 'NULL' OR JSON_LENGTH(" + column + ") = 0)"
+}

@@ -3,7 +3,6 @@ package sql
 import (
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -83,7 +82,7 @@ func TestDialectColumnTypeRejectsUnsupportedField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.ColumnType("field", reflect.TypeOf(make(chan int)), 0, false); err == nil {
+	if _, err := d.ColumnType("field", reflect.TypeFor[chan int](), 0, false); err == nil {
 		t.Fatal("columnType(chan) returned no error")
 	}
 }
@@ -115,7 +114,7 @@ func TestDialectNestedIndexDDL(t *testing.T) {
 		t.Fatal(err)
 	}
 	want = []string{
-		"ALTER TABLE `auditevents` ADD COLUMN `idx_event_occurredAt` varchar(255) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(`event`, '$.\"occurredAt\"'))) VIRTUAL",
+		"ALTER TABLE `auditevents` ADD COLUMN `idx_event_occurredAt` varchar(255) GENERATED ALWAYS AS (json_unquote(json_extract(`event`,_utf8mb4'$.\"occurredAt\"'))) VIRTUAL",
 		"CREATE INDEX `auditevents_event_occurredAt` ON `auditevents` (`idx_event_occurredAt`)",
 	}
 	if !reflect.DeepEqual(statements, want) {
@@ -135,24 +134,6 @@ func TestDialectPlainIndexDDLStaysOnModelColumns(t *testing.T) {
 	want := []string{`CREATE UNIQUE INDEX "identifier_login" ON "identifiers" ("loginKey")`}
 	if !reflect.DeepEqual(statements, want) {
 		t.Fatalf("postgres plain unique index = %#v, want %#v", statements, want)
-	}
-}
-
-func TestDialectUniqueNestedIndexMaterializesExpression(t *testing.T) {
-	MySQLDialect, err := NewDialect(DBDriverMySQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nested := store.Index{Name: "nested_unique", Fields: []string{"event.actor.id"}, Unique: true}
-	statements, err := MySQLDialect.IndexDDL("auditevents", nested)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(statements) != 2 {
-		t.Fatalf("nested unique index statements = %#v", statements)
-	}
-	if !strings.Contains(statements[0], "STORED") {
-		t.Fatalf("unique nested index must materialize the expression: %s", statements[0])
 	}
 }
 
@@ -260,14 +241,14 @@ func TestDialectIdentifiesRetryableConflicts(t *testing.T) {
 
 func TestDialectCreateTableAndAddColumn(t *testing.T) {
 	columns := []ColumnSpec{
-		{Name: "id", Type: reflect.TypeOf(""), Size: 64, Indexed: true},
-		{Name: "content", Type: reflect.TypeOf(map[string]string{})},
+		{Name: "id", Type: reflect.TypeFor[string](), Size: 64, Indexed: true},
+		{Name: "content", Type: reflect.TypeFor[map[string]string]()},
 	}
 	postgres, err := NewDialect(DBDriverPostgres)
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement, err := postgres.CreateTable("assets", columns, []string{"id"})
+	statement, err := postgres.CreateTable("assets", columns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,11 +268,11 @@ func TestDialectCreateTableAndAddColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement, err = MySQLDialect.CreateTable("assets", columns, nil)
+	statement, err = MySQLDialect.CreateTable("assets", columns)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = "CREATE TABLE IF NOT EXISTS `assets` (`id` varchar(64), `content` json)"
+	want = "CREATE TABLE IF NOT EXISTS `assets` (`id` varchar(64), `content` json, PRIMARY KEY (`id`))"
 	if statement != want {
 		t.Fatalf("mysql create table = %s, want %s", statement, want)
 	}

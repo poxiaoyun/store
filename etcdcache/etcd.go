@@ -3,6 +3,7 @@ package etcdcache
 import (
 	"context"
 	"fmt"
+	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -14,8 +15,6 @@ import (
 	"go.etcd.io/etcd/client/v3/kubernetes"
 	"google.golang.org/grpc"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -24,7 +23,7 @@ import (
 	storeerr "k8s.io/apiserver/pkg/storage/errors"
 	"k8s.io/utils/ptr"
 	"xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 const SetScopeFields = false
@@ -184,19 +183,7 @@ func (c *generic) Schema() *store.Schema {
 
 // Capabilities implements store.Store.
 func (c *generic) Capabilities() store.Capabilities {
-	return store.Capabilities{
-		LabelSelector:    true,
-		FieldSelector:    true,
-		Search:           true,
-		Sort:             true,
-		Page:             true,
-		Continue:         true,
-		SubScopes:        true,
-		OptimisticLock:   true,
-		Watch:            true,
-		TTL:              true,
-		SecondaryIndexes: true,
-	}
+	return store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 }
 
 // Close stops all resource reflectors and caches. It does not close a client
@@ -244,6 +231,13 @@ func (c *generic) Count(ctx context.Context, obj store.Object, opts ...store.Cou
 		if !options.IncludeSubScopes {
 			filtered = FilterByScopes(filtered, c.scopes)
 		}
+		if options.Search != "" {
+			fields := options.SearchFields
+			if len(fields) == 0 {
+				fields = []string{"id", "name"}
+			}
+			filtered = slices.DeleteFunc(filtered, func(obj StorageObject) bool { return !searchObject(&obj, fields, options.Search) })
+		}
 		count = len(filtered)
 		return nil
 	}); err != nil {
@@ -255,6 +249,12 @@ func (c *generic) Count(ctx context.Context, obj store.Object, opts ...store.Cou
 // Create implements store.Store.
 func (c *generic) Create(ctx context.Context, obj store.Object, opts ...store.CreateOption) error {
 	options := store.ApplyCreateOptions(opts)
+	if options.DryRun {
+		return errors.NewUnsupported("etcd cache store does not support dry-run")
+	}
+	if options.TTL != 0 && len(obj.GetFinalizers()) != 0 {
+		return errors.NewBadRequest("TTL cannot be combined with finalizers")
+	}
 	return c.core.on(ctx, obj, func(ctx context.Context, db *resourceDB) error {
 		store.PrepareObjectForCreate(obj, db.resource.String(), c.scopes)
 		uns, err := ConvertToUnstructured(obj)
@@ -272,8 +272,13 @@ func (c *generic) Create(ctx context.Context, obj store.Object, opts ...store.Cr
 }
 
 // Delete implements store.Store.
-func (c *generic) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
+func (c *generic) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
 	options := store.ApplyDeleteOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || options.Preconditions != nil && (options.Preconditions.UID != nil || options.Preconditions.ResourceVersion != nil)
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("etcd cache store does not support dry-run")
+	}
 	if err := store.ValidateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -303,12 +308,15 @@ func (c *generic) Delete(ctx context.Context, obj store.Object, opts ...store.De
 		}
 		return current, nil
 	}
-	return c.update(ctx, obj, preconditions, predicate, updatefunc)
+	return c.core.update(ctx, c.scopes, obj, preconditions, predicate, updatefunc, false, true)
 }
 
 // Get implements store.Store.
 func (c *generic) Get(ctx context.Context, name string, obj store.Object, opts ...store.GetOption) error {
 	options := store.ApplyGetOptions(opts)
+	if len(options.Fields) != 0 {
+		return errors.NewUnsupported("etcd cache store does not support field projection")
+	}
 	predicate, err := ConvertPredicate(options.LabelRequirements, options.FieldRequirements)
 	if err != nil {
 		return err
@@ -343,15 +351,18 @@ func (c *generic) Get(ctx context.Context, name string, obj store.Object, opts .
 // List implements store.Store.
 func (c *generic) List(ctx context.Context, list store.ObjectList, opts ...store.ListOption) error {
 	options := store.ApplyListOptions(opts)
-	continueMode := options.Limit > 0
-	pageMode := !continueMode && options.Size > 0
-	page := options.Page
-	if pageMode && page < 1 {
-		page = 1
+	if len(options.Fields) != 0 {
+		return errors.NewUnsupported("etcd cache store does not support field projection")
 	}
-	if options.Limit > 0 && options.Sort != "" {
-		return errors.NewUnsupported("etcd cache does not support sorting continuation lists")
+	resource, err := store.GetResource(list)
+	if err != nil {
+		return err
 	}
+	page, err := store.PrepareListPage(resource, c.scopes, options)
+	if err != nil {
+		return err
+	}
+	options = page.Options
 	preficate, err := ConvertPredicate(options.LabelRequirements, options.FieldRequirements)
 	if err != nil {
 		return err
@@ -396,42 +407,23 @@ func (c *generic) List(ctx context.Context, list store.ObjectList, opts ...store
 			return filtered
 		}
 
-		var (
-			filtered        []StorageObject
-			continueToken   string
-			resourceVersion int64
-		)
-		if continueMode {
-			continueToken = options.Continue
-			for {
-				predicate := preficate
-				predicate.Continue = continueToken
-				predicate.Limit = int64(options.Limit - len(filtered))
-				unslist, err := getList(predicate)
-				if err != nil {
-					return err
-				}
-				filtered = append(filtered, filter(unslist.Items)...)
-				continueToken = unslist.GetContinue()
-				resourceVersion = unslist.GetResourceVersion()
-				if continueToken == "" || len(filtered) >= options.Limit {
-					break
-				}
-			}
-		} else {
-			unslist, err := getList(preficate)
-			if err != nil {
-				return err
-			}
-			filtered = filter(unslist.Items)
-			resourceVersion = unslist.GetResourceVersion()
-			SortUnstructuredList(filtered, store.ParseSorts(options.Sort))
+		unslist, err := getList(preficate)
+		if err != nil {
+			return err
 		}
+		filtered := filter(unslist.Items)
+		resourceVersion := unslist.GetResourceVersion()
+		SortUnstructuredList(filtered, store.ParseSorts(options.Sort))
 
 		// pagination
 		total := len(filtered)
-		if pageMode {
-			filtered = PageUnstructuredList(filtered, page, options.Size)
+		{
+			start := min(max(options.Offset, 0), total)
+			end := total
+			if options.Limit > 0 {
+				end = start + min(options.Limit, total-start)
+			}
+			filtered = filtered[start:end]
 		}
 
 		// convert to result
@@ -440,19 +432,13 @@ func (c *generic) List(ctx context.Context, list store.ObjectList, opts ...store
 			if err := ConvertFromUnstructured(&uns, obj, db.resource); err != nil {
 				return err
 			}
-			v.Set(reflect.Append(v, reflect.ValueOf(obj).Elem()))
-		}
-		if continueMode {
-			store.SetContinuationListMetadata(list, continueToken, options.Limit)
-		} else if pageMode {
-			store.SetPageListMetadata(list, page, options.Size, total)
-		} else {
-			store.SetUnpaginatedListMetadata(list, total)
+			v.Set(reflect.Append(v, reflect.ValueOf(obj).
+				Elem()))
 		}
 		list.SetResourceVersion(resourceVersion)
 		list.SetScopes(c.scopes)
 		list.SetResource(db.resource.String())
-		return nil
+		return page.Finish(list)
 	})
 }
 
@@ -464,8 +450,12 @@ func formatResourceVersion(i *int64) string {
 }
 
 // Patch implements store.Store.
-func (c *generic) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
+func (c *generic) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
 	options := store.ApplyPatchOptions(opts)
+	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+	if options.DryRun {
+		return errors.NewUnsupported("etcd cache store does not support dry-run")
+	}
 	preconditions := &storage.Preconditions{}
 	if obj.GetUID() != "" {
 		preconditions.UID = ptr.To(types.UID(obj.GetUID()))
@@ -495,10 +485,19 @@ func (c *generic) Scope(scope ...store.Scope) store.Store {
 }
 
 var errShouldDelete = fmt.Errorf("should delete")
+var errSnapshotChanged = fmt.Errorf("object changed while checking lease")
 
 // Update implements store.Store.
-func (c *generic) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (c *generic) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	options := store.ApplyUpdateOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.TTL != 0 {
+		return errors.NewUnsupported("etcd cache supports TTL only on Create")
+	}
+	if options.DryRun {
+		return errors.NewUnsupported("etcd cache store does not support dry-run")
+	}
 	updatefunc := func(ctx context.Context, oldObj *store.Unstructured) (store.Object, error) {
 		return obj, nil
 	}
@@ -517,7 +516,7 @@ func (c *generic) Update(ctx context.Context, obj store.Object, opts ...store.Up
 }
 
 func (c *generic) update(ctx context.Context, obj store.Object, preconditions *storage.Preconditions, predicate storage.SelectionPredicate, updatefunc updateFunc) error {
-	return c.core.update(ctx, c.scopes, obj, preconditions, predicate, updatefunc, false)
+	return c.core.update(ctx, c.scopes, obj, preconditions, predicate, updatefunc, false, false)
 }
 
 // Status implements store.Store.
@@ -533,8 +532,12 @@ type status struct {
 }
 
 // Patch implements store.StatusStorage.
-func (s *status) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
+func (s *status) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
 	options := store.ApplyPatchOptions(opts)
+	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+	if options.DryRun {
+		return errors.NewUnsupported("etcd cache store does not support dry-run")
+	}
 	preconditions := &storage.Preconditions{}
 	if obj.GetUID() != "" {
 		preconditions.UID = ptr.To(types.UID(obj.GetUID()))
@@ -556,12 +559,20 @@ func (s *status) Patch(ctx context.Context, obj store.Object, patch store.Patch,
 }
 
 func (s *status) update(ctx context.Context, obj store.Object, preconditions *storage.Preconditions, predicate storage.SelectionPredicate, updatefunc updateFunc) error {
-	return s.core.update(ctx, s.scopes, obj, preconditions, predicate, updatefunc, true)
+	return s.core.update(ctx, s.scopes, obj, preconditions, predicate, updatefunc, true, false)
 }
 
 // Update implements store.StatusStorage.
-func (s *status) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (s *status) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	options := store.ApplyUpdateOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.TTL != 0 {
+		return errors.NewUnsupported("etcd cache supports TTL only on Create")
+	}
+	if options.DryRun {
+		return errors.NewUnsupported("etcd cache store does not support dry-run")
+	}
 	preconditions := &storage.Preconditions{}
 	if obj.GetUID() != "" {
 		preconditions.UID = ptr.To(types.UID(obj.GetUID()))
@@ -618,111 +629,105 @@ func convertError(err error) error {
 
 type updateFunc func(ctx context.Context, current *store.Unstructured) (newObj store.Object, err error)
 
-func (c *core) update(ctx context.Context, scopes []store.Scope, obj store.Object, preconditions *storage.Preconditions, predicate storage.SelectionPredicate, fn updateFunc, statusOnly bool) error {
-	if !predicate.Empty() {
-		return errors.NewBadRequest("predicate is not supported")
-	}
+func (c *core) update(ctx context.Context, scopes []store.Scope, obj store.Object, preconditions *storage.Preconditions, predicate storage.SelectionPredicate, fn updateFunc, statusOnly, deleting bool) error {
 	return c.on(ctx, obj, func(ctx context.Context, db *resourceDB) error {
-		out := &StorageObject{}
 		key := getObjectKey(scopes, db.resource.String(), obj.GetID())
-		err := db.storage.GuaranteedUpdate(ctx, key, out, false, preconditions, func(input runtime.Object, res storage.ResponseMeta) (output runtime.Object, ttl *uint64, err error) {
-			current, ok := input.(*StorageObject)
-			if !ok {
-				return nil, nil, fmt.Errorf("unexpected object type: %T", input)
+		// Delete must protect the exact snapshot used by GuaranteedUpdate. If
+		// another writer wins, rerun the original operation against its new state.
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			// backup fields
-			statusfield, _, _ := unstructured.NestedFieldNoCopy(current.Object, "status")
-			unsobj := &store.Unstructured{}
-			if err := ConvertFromUnstructured(current, unsobj, db.resource); err != nil {
-				return nil, nil, err
-			}
-			currentMap, err := store.ObjectToMap(unsobj)
-			if err != nil {
-				return nil, nil, err
-			}
-			scopes, id, uid, creation, deletion, generation := unsobj.GetScopes(), unsobj.GetID(), unsobj.GetUID(), unsobj.GetCreationTimestamp(), unsobj.GetDeletionTimestamp(), unsobj.GetGeneration()
-			unsobjchanged, err := fn(ctx, unsobj)
-			if err != nil {
-				return nil, nil, err
-			}
-			// do not change scopes
-			unsobjchanged.SetScopes(scopes)
-			unsobjchanged.SetID(id)
-			unsobjchanged.SetUID(uid)
-			unsobjchanged.SetResource(db.resource.String())
-			unsobjchanged.SetCreationTimestamp(creation)
-			// once deletiontime is set, it can not be updated
-			if deletion != nil {
-				unsobjchanged.SetDeletionTimestamp(deletion)
-			}
-
-			newuns, err := ConvertToUnstructured(unsobjchanged)
-			if err != nil {
-				return nil, nil, err
-			}
-			// resource can not be changed
-			newuns.GetObjectKind().SetGroupVersionKind(current.GetObjectKind().GroupVersionKind())
-			// restore ignored fields
-			if statusOnly {
-				// status-only update: keep only status field from new object, preserve all other fields (including generation)
-				status, _, _ := unstructured.NestedFieldNoCopy(newuns.Object, "status")
-				newuns.Object = (&unstructured.Unstructured{Object: current.Object}).DeepCopy().Object
-				_ = unstructured.SetNestedField(newuns.Object, status, "status")
-				// generation is already preserved in the copied object
-			} else {
-				// Normal updates preserve status and only business-field changes advance generation.
-				_ = unstructured.SetNestedField(newuns.Object, statusfield, "status")
-				changedMap, err := store.ObjectToMap(unsobjchanged)
+			out := &StorageObject{}
+			var desired store.Object
+			var deleteVersion string
+			err := db.storage.GuaranteedUpdate(ctx, key, out, false, preconditions, func(input runtime.Object, res storage.ResponseMeta) (runtime.Object, *uint64, error) {
+				current := input.(*StorageObject)
+				matches, err := predicate.Matches(current)
 				if err != nil {
 					return nil, nil, err
 				}
-				if !store.ObjectBusinessFieldsEqual(currentMap, changedMap) {
-					generation++
+				if !matches {
+					return nil, nil, errors.NewConflict(db.resource.String(), obj.GetID(), fmt.Errorf("write conditions did not match"))
 				}
-				_ = unstructured.SetNestedField(newuns.Object, generation, "generation")
-			}
 
-			if ShouldDeleteDuringUpdate(ctx, key, newuns, current) {
-				return newuns, nil, errShouldDelete
-			}
-			return newuns, nil, nil
-		}, nil)
-		if err != nil {
-			if err == errShouldDelete {
-				// Using the rest.ValidateAllObjectFunc because the request is an UPDATE request and has already passed the admission for the UPDATE verb.
-				if err := db.storage.Delete(ctx, key, out, preconditions, rest.ValidateAllObjectFunc, nil, storage.DeleteOptions{}); err != nil {
-					// Deletion is racy, i.e., there could be multiple update
-					// requests to remove all finalizers from the object, so we
-					// ignore the NotFound error.
-					if !storage.IsNotFound(err) {
-						err = storeerr.InterpretDeleteError(err, db.resource, obj.GetID())
-						return err
+				original := store.NewObject(obj)
+				if err := ConvertFromUnstructured(current, original, db.resource); err != nil {
+					return nil, nil, err
+				}
+				uns := &store.Unstructured{}
+				if err := ConvertFromUnstructured(current, uns, db.resource); err != nil {
+					return nil, nil, err
+				}
+				changed, err := fn(ctx, uns)
+				if err != nil && err != errShouldDelete {
+					return nil, nil, err
+				}
+				remove := err == errShouldDelete
+				desired = store.NewObject(obj)
+				if err := store.CopyObject(changed, desired); err != nil {
+					return nil, nil, err
+				}
+				if !deleting {
+					remove, err = c.schema.PrepareObjectForUpdate(original, desired, statusOnly)
+					if err != nil {
+						return nil, nil, err
 					}
-					// pass
 				}
-				// pass
-			} else {
-				err = storeerr.InterpretUpdateError(err, db.resource, obj.GetID())
-				return err
+				// Kubernetes storage does not expose the persisted lease in ResponseMeta.
+				// Match the current lease to the observed revision; old modification
+				// revisions may already be compacted. Its update API cannot preserve an existing
+				// lease, so reject such updates rather than silently removing expiration.
+				leased, err := c.cli.KV.Get(ctx, path.Join(c.storagePrefix, key))
+				if err != nil {
+					return nil, nil, err
+				}
+				if len(leased.Kvs) == 0 {
+					return nil, nil, errors.NewNotFound(db.resource.String(), obj.GetID())
+				}
+				if leased.Kvs[0].ModRevision != int64(res.ResourceVersion) {
+					return nil, nil, errSnapshotChanged
+				}
+				if leased.Kvs[0].Lease != 0 {
+					if len(desired.GetFinalizers()) != 0 {
+						return nil, nil, errors.NewBadRequest("TTL cannot be combined with finalizers")
+					}
+					if !remove {
+						return nil, nil, errors.NewUnsupported("etcd cache cannot update an object with an active TTL")
+					}
+				}
+				if remove {
+					deleteVersion = current.GetResourceVersion()
+					return nil, nil, errShouldDelete
+				}
+				output, err := ConvertToUnstructured(desired)
+				if err != nil {
+					return nil, nil, err
+				}
+				output.GetObjectKind().
+					SetGroupVersionKind(current.GetObjectKind().
+						GroupVersionKind())
+				return output, nil, nil
+			}, nil)
+			if err != nil {
+				if err == errSnapshotChanged {
+					continue
+				}
+				if err != errShouldDelete {
+					return storeerr.InterpretUpdateError(err, db.resource, obj.GetID())
+				}
+				condition := &storage.Preconditions{ResourceVersion: &deleteVersion}
+				if err := db.storage.Delete(ctx, key, out, condition, rest.ValidateAllObjectFunc, nil, storage.DeleteOptions{}); err != nil {
+					if storage.IsConflict(err) || storage.IsInvalidObj(err) {
+						continue
+					}
+					return storeerr.InterpretDeleteError(err, db.resource, obj.GetID())
+				}
+				return store.CopyObject(desired, obj)
 			}
+			return ConvertFromUnstructured(out, obj, db.resource)
 		}
-		_ = ConvertFromUnstructured(out, obj, db.resource)
-		return nil
 	})
-}
-
-func ShouldDeleteDuringUpdate(ctx context.Context, key string, obj, existing runtime.Object) bool {
-	newMeta, err := meta.Accessor(obj)
-	if err != nil {
-		return false
-	}
-	if len(newMeta.GetFinalizers()) > 0 {
-		return false
-	}
-	if newMeta.GetDeletionTimestamp() == nil {
-		return false
-	}
-	return true
 }
 
 func (e *core) validateObject(obj any) error {

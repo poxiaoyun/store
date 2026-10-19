@@ -15,9 +15,20 @@ import (
 )
 
 func TestStoreConformance(t *testing.T) {
-	capabilities := (&InMemory{}).Capabilities()
+	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 	storetest.Run(t, storetest.Fixture{
-		Capabilities: capabilities,
+		Capabilities:     capabilities,
+		Continue:         true,
+		LabelSelector:    true,
+		FieldSelector:    true,
+		Search:           true,
+		Sort:             true,
+		SubScopes:        true,
+		DeleteBatch:      true,
+		PatchBatch:       true,
+		SecondaryIndexes: true,
+		UniqueIndexes:    true,
+
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
 			return New(schema)
 		},
@@ -99,7 +110,8 @@ func TestUniqueIndexUpdateAndDelete(t *testing.T) {
 
 func TestNullableUniqueIndex(t *testing.T) {
 	ctx := context.Background()
-	storage := newUserStore(t).Scope(store.Scope{Resource: "tenants", Name: "a"})
+	storage := newUserStore(t).
+		Scope(store.Scope{Resource: "tenants", Name: "a"})
 	for _, id := range []string{"one", "two"} {
 		if err := storage.Create(ctx, &user{ObjectMeta: store.ObjectMeta{ID: id}, Email: id + "@example.com"}); err != nil {
 			t.Fatalf("Create(%s) error = %v", id, err)
@@ -109,10 +121,11 @@ func TestNullableUniqueIndex(t *testing.T) {
 
 func TestConcurrentUniqueIndex(t *testing.T) {
 	ctx := context.Background()
-	storage := newUserStore(t).Scope(store.Scope{Resource: "tenants", Name: "a"})
+	storage := newUserStore(t).
+		Scope(store.Scope{Resource: "tenants", Name: "a"})
 	var successes atomic.Int32
 	var wait sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		wait.Add(1)
 		go func(i int) {
 			defer wait.Done()
@@ -231,35 +244,22 @@ func TestListFiltersSortsAndPagesScopedObjects(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if allEnabled.Total == nil || *allEnabled.Total != 2 ||
-		allEnabled.Continue != "" ||
+	if allEnabled.Continue == "" ||
 		len(allEnabled.Items) != 1 || allEnabled.Items[0].ID != "bob" {
-		t.Fatalf("enabled users = %#v, metadata = total %v continue %q",
+		t.Fatalf("enabled users = %#v, continue %q",
 			allEnabled.Items,
-			allEnabled.Total,
 			allEnabled.Continue,
 		)
 	}
 }
 
-func TestListRejectsCursorPagination(t *testing.T) {
-	storage := newUserStore(t)
-	err := storage.List(
-		context.Background(),
-		&store.List[user]{},
-		store.WithContinue("", 10),
-	)
-	if !commonerrors.IsUnsupported(err) {
-		t.Fatalf("List() error = %v, want Unsupported", err)
-	}
-}
-
 func TestPatchPersistsChangesAndUpdatesIndexes(t *testing.T) {
 	ctx := context.Background()
-	storage := newUserStore(t).Scope(store.Scope{
-		Resource: "tenants",
-		Name:     "a",
-	})
+	storage := newUserStore(t).
+		Scope(store.Scope{
+			Resource: "tenants",
+			Name:     "a",
+		})
 	created := &user{
 		ObjectMeta: store.ObjectMeta{ID: "alice"},
 		Email:      "old@example.com",
@@ -299,10 +299,11 @@ func TestPatchPersistsChangesAndUpdatesIndexes(t *testing.T) {
 
 func TestCountAndBatchOperationsUseSelectors(t *testing.T) {
 	ctx := context.Background()
-	storage := newUserStore(t).Scope(store.Scope{
-		Resource: "tenants",
-		Name:     "a",
-	})
+	storage := newUserStore(t).
+		Scope(store.Scope{
+			Resource: "tenants",
+			Name:     "a",
+		})
 	for _, item := range []*user{
 		{
 			ObjectMeta: store.ObjectMeta{ID: "alice"},
@@ -353,9 +354,6 @@ func TestCountAndBatchOperationsUseSelectors(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if patched.Total == nil || *patched.Total != 2 {
-		t.Fatalf("patched total = %v, want 2", patched.Total)
-	}
 
 	if err := storage.DeleteBatch(
 		ctx,
@@ -368,18 +366,16 @@ func TestCountAndBatchOperationsUseSelectors(t *testing.T) {
 	if err := storage.List(ctx, remaining); err != nil {
 		t.Fatal(err)
 	}
-	if remaining.Total == nil || *remaining.Total != 2 {
-		t.Fatalf("remaining total = %v, want 2", remaining.Total)
-	}
+
 }
 
 func TestWatchSendsInitialAndMutationEvents(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	storage := newUserStore(t).Scope(store.Scope{
-		Resource: "tenants",
-		Name:     "a",
-	})
+	ctx := t.Context()
+	storage := newUserStore(t).
+		Scope(store.Scope{
+			Resource: "tenants",
+			Name:     "a",
+		})
 	existing := &user{
 		ObjectMeta: store.ObjectMeta{ID: "alice"},
 		Email:      "alice@example.com",

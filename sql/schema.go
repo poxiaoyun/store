@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
+	"slices"
 
+	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
 
@@ -21,26 +22,34 @@ type ColumnSpec struct {
 	Indexed bool
 }
 
-// TablePlan is the planned layout of one resource table.
-type TablePlan struct {
+// tablePlan is the planned layout of one resource table.
+type tablePlan struct {
 	// Table is the resource table name.
 	Table string
 	// Columns are the planned columns in model declaration order.
 	Columns []ColumnSpec
-	// Indexes are the declared indexes, including the implicit identity index.
+	// Indexes are the declared secondary indexes; the primary key owns ID uniqueness.
 	Indexes []store.Index
-	// Key is the primary key column list. It stays empty for a scoped resource,
-	// whose identity is the implicit (id, scope keys) unique index instead.
-	Key []string
 }
 
-// PlanTable derives the table layout of one registered resource from its model
+// planTable derives the table layout of one registered resource from its model
 // and schema declaration. Column names are the model's representation names,
 // so DDL and statement building always agree on one name.
-func (s *Storage) PlanTable(resource string, definition store.ResourceSchema) (TablePlan, error) {
+func (s *Storage) planTable(resource string, definition store.ResourceSchema) (tablePlan, error) {
 	fields, err := s.core.codec.ModelFields(definition.Object)
 	if err != nil {
-		return TablePlan{}, err
+		return tablePlan{}, err
+	}
+	for _, name := range definition.GenerationFields {
+		supported := false
+		for _, field := range fields {
+			if field.Name == name && !documentType(field.Type) {
+				supported = true
+			}
+		}
+		if !supported {
+			return tablePlan{}, errors.NewUnsupported("SQL Generation tracking requires top-level scalar fields")
+		}
 	}
 	columns := make([]ColumnSpec, 0, len(fields))
 	known := make(map[string]struct{}, len(fields))
@@ -50,23 +59,29 @@ func (s *Storage) PlanTable(resource string, definition store.ResourceSchema) (T
 	}
 	for _, field := range fields {
 		columns = append(columns, ColumnSpec{
-			Name: field.Name,
-			Type: field.Type,
-			Size: specs[field.Name].Size,
+			Name:    field.Name,
+			Type:    field.Type,
+			Size:    specs[field.Name].Size,
+			Indexed: field.Name == "id",
 		})
 		known[field.Name] = struct{}{}
 	}
 	for _, spec := range definition.FieldSpecs {
 		if _, ok := known[spec.Name]; !ok {
-			return TablePlan{}, fmt.Errorf("resource %q declares a field spec for unknown field %q", resource, spec.Name)
+			return tablePlan{}, fmt.Errorf("resource %q declares a field spec for unknown field %q", resource, spec.Name)
 		}
 	}
 	for _, scopeKey := range definition.ScopeKeys {
 		if _, ok := known[scopeKey]; !ok {
-			return TablePlan{}, fmt.Errorf("resource %q declares scope key %q without a matching field", resource, scopeKey)
+			return tablePlan{}, fmt.Errorf("resource %q declares scope key %q without a matching field", resource, scopeKey)
 		}
 	}
+	indexes := make([]store.Index, 0, len(definition.Indexes))
 	for _, index := range definition.Indexes {
+		if definition.IsPrimaryIndex(index) {
+			continue
+		}
+		indexes = append(indexes, index)
 		for _, indexed := range index.Fields {
 			name := indexed
 			if IsNestedField(indexed) {
@@ -75,7 +90,7 @@ func (s *Storage) PlanTable(resource string, definition store.ResourceSchema) (T
 				name = JSONPath(indexed)[0]
 			}
 			if _, ok := known[name]; !ok {
-				return TablePlan{}, fmt.Errorf("resource %q index %q references unknown field %q", resource, index.Name, indexed)
+				return tablePlan{}, fmt.Errorf("resource %q index %q references unknown field %q", resource, index.Name, indexed)
 			}
 			if IsNestedField(indexed) {
 				continue
@@ -87,13 +102,10 @@ func (s *Storage) PlanTable(resource string, definition store.ResourceSchema) (T
 			}
 		}
 	}
-	plan := TablePlan{
+	plan := tablePlan{
 		Table:   resource,
 		Columns: columns,
-		Indexes: definition.Indexes,
-	}
-	if len(definition.ScopeKeys) == 0 {
-		plan.Key = []string{"id"}
+		Indexes: indexes,
 	}
 	return plan, nil
 }
@@ -117,11 +129,11 @@ func (s *Storage) ensureSchema(ctx context.Context) error {
 // It never drops or retypes a column: removing a field requires an explicit
 // migration outside the Store.
 func (s *Storage) ensureResource(ctx context.Context, resource string, definition store.ResourceSchema) error {
-	plan, err := s.PlanTable(resource, definition)
+	plan, err := s.planTable(resource, definition)
 	if err != nil {
 		return err
 	}
-	createTable, err := s.core.dialect.CreateTable(plan.Table, plan.Columns, plan.Key)
+	createTable, err := s.core.dialect.CreateTable(plan.Table, plan.Columns)
 	if err != nil {
 		return err
 	}
@@ -147,15 +159,25 @@ func (s *Storage) ensureResource(ctx context.Context, resource string, definitio
 	return s.ensureIndexes(ctx, plan)
 }
 
-func (s *Storage) ensureIndexes(ctx context.Context, plan TablePlan) error {
+func (s *Storage) ensureIndexes(ctx context.Context, plan tablePlan) error {
 	existing, err := s.core.dialect.Indexes(ctx, s.core.exec, plan.Table)
 	if err != nil {
 		return err
 	}
+	var primary []string
+	for _, index := range existing {
+		if index.Primary {
+			primary = index.Columns
+			break
+		}
+	}
+	if !slices.Equal(primary, []string{"id"}) {
+		return fmt.Errorf("table %q requires primary key (id); migrate the existing table before constructing the Store", plan.Table)
+	}
 	for _, index := range plan.Indexes {
-		current, ok := existing[index.Name]
+		_, ok := existing[index.Name]
 		if ok {
-			if err := ValidateExistingIndex(plan.Table, index, current); err != nil {
+			if err := s.core.dialect.ValidateIndex(ctx, s.core.exec, plan.Table, index); err != nil {
 				return err
 			}
 			continue
@@ -169,24 +191,6 @@ func (s *Storage) ensureIndexes(ctx context.Context, plan TablePlan) error {
 				return s.core.dialect.MapError(err, plan.Table, index.Name)
 			}
 		}
-	}
-	return nil
-}
-
-// validateExistingIndex rejects a same-named index that drifted from the
-// declared definition. An index over a nested path materializes the expression
-// in a derived column, so only its uniqueness is comparable.
-func ValidateExistingIndex(table string, declared store.Index, existing IndexInfo) error {
-	if existing.Unique != declared.Unique {
-		return fmt.Errorf("table %q index %q conflicts with the declared uniqueness", table, declared.Name)
-	}
-	for _, field := range declared.Fields {
-		if IsNestedField(field) {
-			return nil
-		}
-	}
-	if !reflect.DeepEqual(existing.Columns, declared.Fields) {
-		return fmt.Errorf("table %q index %q conflicts with the declared fields %s", table, declared.Name, strings.Join(declared.Fields, ", "))
 	}
 	return nil
 }

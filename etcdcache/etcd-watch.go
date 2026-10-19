@@ -15,7 +15,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/utils/ptr"
 	"xiaoshiai.cn/common/log"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 func init() {
@@ -42,6 +42,10 @@ func (c *generic) Watch(ctx context.Context, obj store.ObjectList, opts ...store
 	}
 	db, err := c.core.getResource(resource)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := db.waitReady(ctx); err != nil {
 		return nil, err
 	}
 
@@ -102,7 +106,8 @@ type warpWatcher struct {
 func (w *warpWatcher) run(ctx context.Context) {
 	defer close(w.result)
 	defer w.cancel()
-	defer log.V(5).Info("watcher stopped", "resource", w.resource, "scopes", w.scopes)
+	defer log.V(5).
+		Info("watcher stopped", "resource", w.resource, "scopes", w.scopes)
 	go func() {
 		<-ctx.Done()
 		w.w.Stop()

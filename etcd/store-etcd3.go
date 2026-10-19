@@ -6,6 +6,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,12 +15,10 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/kubernetes"
 	"google.golang.org/grpc"
-	k8sstorage "k8s.io/apiserver/pkg/storage"
 	"k8s.io/utils/ptr"
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/log"
-	"xiaoshiai.cn/common/meta"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 var ErrResourceVersionSetOnCreate = stderrors.New("resourceVersion should not be set on objects to be created")
@@ -157,16 +156,7 @@ func (e *EtcdStore) Schema() *store.Schema {
 
 // Capabilities implements store.Store.
 func (e *EtcdStore) Capabilities() store.Capabilities {
-	return store.Capabilities{
-		LabelSelector:  true,
-		FieldSelector:  true,
-		Page:           true,
-		Continue:       true,
-		SubScopes:      true,
-		OptimisticLock: true,
-		Watch:          true,
-		TTL:            true,
-	}
+	return store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 }
 
 func (e *EtcdStore) Ping(ctx context.Context) error {
@@ -187,6 +177,9 @@ func (e *EtcdStore) DeleteBatch(ctx context.Context, obj store.ObjectList, opts 
 // Count implements Store.
 func (e *EtcdStore) Count(ctx context.Context, obj store.Object, opts ...store.CountOption) (int, error) {
 	options := store.ApplyCountOptions(opts)
+	if options.Search != "" || len(options.SearchFields) != 0 {
+		return 0, errors.NewUnsupported("etcd store does not support search")
+	}
 	resource, err := store.GetResource(obj)
 	if err != nil {
 		return 0, err
@@ -218,6 +211,9 @@ func (e *EtcdStore) Create(ctx context.Context, obj store.Object, opts ...store.
 	if creatoptions.DryRun {
 		return errors.NewUnsupported("etcd store does not support dry-run")
 	}
+	if creatoptions.TTL != 0 && len(obj.GetFinalizers()) != 0 {
+		return errors.NewBadRequest("TTL cannot be combined with finalizers")
+	}
 	store.PrepareObjectForCreate(obj, resource, e.scopes)
 
 	preparedKey := e.core.getkey(e.scopes, resource, obj.GetID())
@@ -230,11 +226,14 @@ func (e *EtcdStore) Create(ctx context.Context, obj store.Object, opts ...store.
 	if err != nil {
 		return err
 	}
-	txnResp, err := e.core.client.KV.Txn(ctx).If(
-		keyHasRevision(preparedKey, 0), // key does not exist
-	).Then(
-		clientv3.OpPut(preparedKey, string(data), putopts...),
-	).Commit()
+	txnResp, err := e.core.client.KV.Txn(ctx).
+		If(
+			keyHasRevision(preparedKey, 0), // key does not exist
+		).
+		Then(
+			clientv3.OpPut(preparedKey, string(data), putopts...),
+		).
+		Commit()
 	if err != nil {
 		return errors.NewInternalError(err)
 	}
@@ -257,8 +256,13 @@ func keyHasRevision(key string, rev int64) clientv3.Cmp {
 }
 
 // Delete implements Store.
-func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
+func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
 	deleteoptions := store.ApplyDeleteOptions(opts)
+	conditional := len(deleteoptions.LabelRequirements)+len(deleteoptions.FieldRequirements) > 0 || deleteoptions.Preconditions != nil && (deleteoptions.Preconditions.UID != nil || deleteoptions.Preconditions.ResourceVersion != nil)
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if deleteoptions.DryRun {
+		return errors.NewUnsupported("etcd store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(deleteoptions.LabelRequirements, deleteoptions.FieldRequirements); err != nil {
 		return err
 	}
@@ -311,6 +315,9 @@ func (e *EtcdStore) Get(ctx context.Context, name string, obj store.Object, opts
 		return err
 	}
 	options := store.ApplyGetOptions(opts)
+	if len(options.Fields) != 0 {
+		return errors.NewUnsupported("etcd store does not support field projection")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -342,156 +349,111 @@ func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...sto
 		return err
 	}
 	options := store.ApplyListOptions(opts)
+	if len(options.Fields) != 0 {
+		return errors.NewUnsupported("etcd store does not support field projection")
+	}
+	if options.Search != "" || len(options.SearchFields) != 0 {
+		return errors.NewUnsupported("etcd store does not support search")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
 	if err := e.core.validateObjectList(list); err != nil {
 		return err
 	}
-	v, newItemFunc, err := store.NewItemFuncFromList(list)
+	page, err := store.PrepareListPage(resource, e.scopes, options)
 	if err != nil {
 		return err
 	}
-	preparedKey := e.core.getlistkey(e.scopes, resource)
-	rangeEnd := clientv3.GetPrefixRangeEnd(preparedKey)
-	continuation := options.Limit > 0
-	pageMode := !continuation && options.Size > 0
-	page := options.Page
-	if pageMode && page < 1 {
-		page = 1
+	options = page.Options
+	values, newItem, err := store.NewItemFuncFromList(list)
+	if err != nil {
+		return err
 	}
-	if continuation && options.Sort != "" {
-		return errors.NewUnsupported("etcd does not support sort with continuation pagination")
+	values.Set(reflect.MakeSlice(values.Type(), 0, 0))
+	key := e.core.getlistkey(e.scopes, resource)
+	type item struct {
+		object store.Object
+		fields *store.Unstructured
 	}
-	startKey := preparedKey
-	withRev := options.ResourceVersion
-	if continuation && options.Continue != "" {
-		continueKey, continueRevision, err := k8sstorage.DecodeContinue(options.Continue, preparedKey)
-		if err != nil {
-			return errors.NewBadRequest(fmt.Sprintf("invalid continue token: %v", err))
-		}
-		startKey = continueKey
-		withRev = ptr.To(continueRevision)
-	}
-
-	// clean existing items
-	v.SetZero()
-	var lastKey []byte
-	hasMore := false
+	items := []item{}
+	startKey := key
+	rangeEnd := clientv3.GetPrefixRangeEnd(key)
+	requested := store.ApplyListOptions(opts)
+	bounded := !options.IncludeSubScopes && (requested.Sort == "" || requested.Sort == "id+") && options.Limit > 0
+	var revision int64
 	for {
-		getoptions := []clientv3.OpOption{clientv3.WithRange(rangeEnd)}
-		if withRev != nil {
-			getoptions = append(getoptions, clientv3.WithRev(*withRev))
+		getOptions := []clientv3.OpOption{clientv3.WithRange(rangeEnd)}
+		if revision != 0 {
+			getOptions = append(getOptions, clientv3.WithRev(revision))
+		} else if options.ResourceVersion != nil {
+			getOptions = append(getOptions, clientv3.WithRev(*options.ResourceVersion))
 		}
-		if continuation {
-			remaining := options.Limit - v.Len()
-			getoptions = append(getoptions, clientv3.WithLimit(int64(remaining)))
+		if bounded {
+			getOptions = append(getOptions, clientv3.WithLimit(int64(options.Offset)+int64(options.Limit)-int64(len(items))))
 		}
-		getResp, err := e.core.client.KV.Get(ctx, startKey, getoptions...)
+		response, err := e.core.client.KV.Get(ctx, startKey, getOptions...)
 		if err != nil {
 			return InterpretEtcdReadError(resource, err)
 		}
-		hasMore = getResp.More
-		if len(getResp.Kvs) == 0 && hasMore {
-			return errors.NewInternalError(fmt.Errorf("etcd returned no keys but more is true"))
-		}
-		if withRev == nil || *withRev == 0 {
-			withRev = ptr.To(getResp.Header.Revision)
-		}
-		store.GrowSlice(v, len(getResp.Kvs))
-		for _, kv := range getResp.Kvs {
-			lastKey = kv.Key
-			// has subresources
-			if !options.IncludeSubScopes {
-				if index := bytes.Index(kv.Key[len(preparedKey):], []byte("/")); index != -1 {
-					continue
-				}
+		if revision == 0 {
+			revision = response.Header.Revision
+			if options.ResourceVersion != nil && *options.ResourceVersion > 0 {
+				revision = *options.ResourceVersion
 			}
-			// Check if the request has already timed out before decode object
-			select {
-			case <-ctx.Done():
-				// parent context is canceled or timed out, no point in continuing
-				return errors.NewBadRequest("request timeout")
-			default:
+		}
+		for _, kv := range response.Kvs {
+
+			if !options.IncludeSubScopes && bytes.Contains(kv.Key[len(key):], []byte("/")) {
+				continue
 			}
-			obj := newItemFunc()
-			if err := e.core.serializer.Decode(kv.Value, obj); err != nil {
+			object := newItem()
+			if err := e.core.serializer.Decode(kv.Value, object); err != nil {
 				return errors.NewInternalError(err)
 			}
-			obj.SetResourceVersion(kv.ModRevision)
-
-			matchesFields, err := matchFieldRequirements(obj, options.FieldRequirements)
+			object.SetResourceVersion(kv.ModRevision)
+			matches, err := matchFieldRequirements(object, options.FieldRequirements)
 			if err != nil {
 				return err
 			}
-			if store.MatchLabelReqirements(obj, options.LabelRequirements) && matchesFields {
-				v.Set(reflect.Append(v, reflect.ValueOf(obj).Elem()))
+			if !matches || !store.MatchLabelReqirements(object, options.LabelRequirements) {
+				continue
 			}
+			unstructured, err := store.ToUnstructured(object)
+			if err != nil {
+				return err
+			}
+			items = append(items, item{object: object, fields: unstructured})
 		}
-		if !hasMore || !continuation {
+		if !response.More || bounded && len(items) >= options.Offset+options.Limit {
 			break
 		}
-		if v.Len() >= options.Limit {
-			break
-		}
-		startKey = string(lastKey) + "\x00"
+		startKey = string(response.Kvs[len(response.Kvs)-1].Key) + "\x00"
 	}
-
 	sorts := store.ParseSorts(options.Sort)
-	if len(sorts) == 1 && sorts[0].Field == "id" && sorts[0].Direction == meta.SortDirectionDesc {
-		for left, right := 0, v.Len()-1; left < right; left, right = left+1, right-1 {
-			leftItem := v.Index(left)
-			rightItem := v.Index(right)
-			leftCopy := reflect.New(leftItem.Type())
-			leftValue := leftCopy.Elem()
-			leftValue.Set(leftItem)
-			leftItem.Set(rightItem)
-			rightItem.Set(leftValue)
-		}
+	slices.SortStableFunc(items, func(a, b item) int { return store.CompareUnstructuredField(a.fields, b.fields, sorts) })
+	start := min(options.Offset, len(items))
+	end := len(items)
+	if options.Limit > 0 {
+		end = start + min(options.Limit, len(items)-start)
 	}
-
-	total := v.Len()
-	if pageMode {
-		pageIndex := page - 1
-		start := total
-		if pageIndex <= total/options.Size {
-			start = pageIndex * options.Size
-		}
-		end := start + min(options.Size, total-start)
-		if start >= total {
-			v.Set(reflect.MakeSlice(v.Type(), 0, 0))
-		} else {
-			v.Set(v.Slice(start, end))
-		}
+	for _, item := range items[start:end] {
+		values.Set(reflect.Append(values, reflect.ValueOf(item.object).
+			Elem()))
 	}
-	if v.IsNil() {
-		// Ensure that we never return a nil Items pointer in the result for consistency.
-		v.Set(reflect.MakeSlice(v.Type(), 0, 0))
-	}
-	continueToken := ""
-	if continuation && hasMore {
-		continueToken, err = k8sstorage.EncodeContinue(string(lastKey)+"\x00", preparedKey, ptr.Deref(withRev, 0))
-		if err != nil {
-			return errors.NewInternalError(err)
-		}
-	}
-	switch {
-	case continuation:
-		store.SetContinuationListMetadata(list, continueToken, options.Limit)
-	case pageMode:
-		store.SetPageListMetadata(list, page, options.Size, total)
-	default:
-		store.SetUnpaginatedListMetadata(list, total)
-	}
-	list.SetResourceVersion(ptr.Deref(withRev, 0))
-	list.SetScopes(e.scopes)
 	list.SetResource(resource)
-	return nil
+	list.SetScopes(e.scopes)
+	list.SetResourceVersion(revision)
+	return page.Finish(list)
 }
 
 // Patch implements Store.
-func (e *EtcdStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
+func (e *EtcdStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
 	options := store.ApplyPatchOptions(opts)
+	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+	if options.DryRun {
+		return errors.NewUnsupported("etcd store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -506,7 +468,7 @@ func (e *EtcdStore) Patch(ctx context.Context, obj store.Object, patch store.Pat
 		if err := store.ApplyPatch(desired, obj, patch); err != nil {
 			return nil, err
 		}
-		_, err := store.PrepareObjectForUpdate(current, desired, false)
+		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, false)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -526,8 +488,13 @@ func (e *EtcdStore) Status() store.StatusStorage {
 }
 
 // Update implements Store.
-func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	options := store.ApplyUpdateOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("etcd store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -546,7 +513,7 @@ func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.
 		if err := store.CopyObject(requested, desired); err != nil {
 			return nil, err
 		}
-		_, err := store.PrepareObjectForUpdate(current, desired, false)
+		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, false)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -564,8 +531,12 @@ type EtcdStatusStore struct {
 }
 
 // Patch implements StatusStorage.
-func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
+func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
 	options := store.ApplyPatchOptions(opts)
+	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+	if options.DryRun {
+		return errors.NewUnsupported("etcd store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -580,7 +551,7 @@ func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch sto
 		if err := store.ApplyPatch(desired, obj, patch); err != nil {
 			return nil, err
 		}
-		_, err := store.PrepareObjectForUpdate(current, desired, true)
+		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, true)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -590,12 +561,20 @@ func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch sto
 }
 
 // Update implements StatusStorage.
-func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	resource, err := store.GetResource(obj)
 	if err != nil {
 		return err
 	}
 	options := store.ApplyUpdateOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.TTL != 0 {
+		return errors.NewUnsupported("status updates cannot set TTL")
+	}
+	if options.DryRun {
+		return errors.NewUnsupported("etcd store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -614,7 +593,7 @@ func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...
 		if err := store.CopyObject(requested, desired); err != nil {
 			return nil, err
 		}
-		_, err := store.PrepareObjectForUpdate(current, desired, true)
+		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, true)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -664,21 +643,23 @@ func (e *etcdStoreCore) validateObject(obj store.Object) error {
 }
 
 func (e *etcdStoreCore) getlistkey(scopes []store.Scope, resource string) string {
-	key := e.KeyPrefix + "/" + resource
+	var key strings.Builder
+	key.WriteString(e.KeyPrefix + "/" + resource)
 	for _, scope := range scopes {
-		key += "/" + scope.Resource + "/" + scope.Name
+		key.WriteString("/" + scope.Resource + "/" + scope.Name)
 	}
-	return key + "/"
+	return key.String() + "/"
 }
 
 func (e *etcdStoreCore) getkey(scopes []store.Scope, resource, name string) string {
 	// merge all scopes into a single key
-	key := e.KeyPrefix + "/" + resource
+	var key strings.Builder
+	key.WriteString(e.KeyPrefix + "/" + resource)
 	for _, scope := range scopes {
-		key += "/" + scope.Resource + "/" + scope.Name
+		key.WriteString("/" + scope.Resource + "/" + scope.Name)
 	}
-	key += "/" + name
-	return key
+	key.WriteString("/" + name)
+	return key.String()
 }
 
 type tryUpdateOptions struct {
@@ -708,10 +689,15 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 
 	preparedKey := e.getkey(scopes, resource, id)
 
-	currentdata, err := e.getCurrent(ctx, preparedKey, current, 0)
+	response, err := e.client.KV.Get(ctx, preparedKey)
+	if err != nil {
+		return errors.NewInternalError(err)
+	}
+	currentdata, err := e.decodeGetResp(response, current, 0)
 	if err != nil {
 		return err
 	}
+	lease := response.Kvs[0].Lease
 	for {
 		currentversion := current.GetResourceVersion()
 		unstructured, err := store.ToUnstructured(current)
@@ -725,6 +711,9 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 		updated, err := do(current)
 		if err != nil {
 			return err
+		}
+		if len(updated.GetFinalizers()) != 0 && (lease != 0 || options.TTL != 0) {
+			return errors.NewBadRequest("TTL cannot be combined with finalizers")
 		}
 		// should set scopes
 		updated.SetScopes(scopes)
@@ -756,6 +745,7 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 					return err
 				}
 				currentdata = newcurrent
+				lease = getResp.Kvs[0].Lease
 				continue
 			}
 			if err := store.CopyObject(updated, obj); err != nil {
@@ -769,10 +759,13 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 		if err != nil {
 			return errors.NewInternalError(err)
 		}
-		if !bytes.Equal(data, currentdata) {
+		if !bytes.Equal(data, currentdata) || options.TTL != 0 {
 			putopts, err := e.ttlOpts(ctx, options.TTL)
 			if err != nil {
 				return err
+			}
+			if options.TTL == 0 {
+				putopts = []clientv3.OpOption{clientv3.WithIgnoreLease()}
 			}
 			txn := e.client.KV.Txn(ctx)
 			txnResp, err := txn.
@@ -796,9 +789,11 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 					return err
 				}
 				currentdata = newcurrent
+				lease = getResp.Kvs[0].Lease
 				continue
 			}
-			currentversion = txnResp.Responses[0].GetResponsePut().Header.Revision
+			currentversion = txnResp.Responses[0].GetResponsePut().
+				Header.Revision
 		}
 		store.ResetObject(obj)
 		if err := e.serializer.Decode(data, obj); err != nil {
@@ -834,6 +829,7 @@ func (s *etcdStoreCore) decodeGetResp(getResp *clientv3.GetResponse, into store.
 			fmt.Errorf("resourceVersion %d is newer than current %d", rev, kv.ModRevision))
 	}
 	if into != nil {
+		store.ResetObject(into)
 		if err := s.serializer.Decode(kv.Value, into); err != nil {
 			return nil, errors.NewInternalError(err)
 		}
@@ -865,10 +861,12 @@ func (e *etcdStoreCore) directDelete(ctx context.Context, scopes []store.Scope, 
 	if !txnResp.Succeeded {
 		getResp := txnResp.Responses[0].GetResponseRange()
 		if len(getResp.Kvs) == 0 {
-			log.V(4).Info("deletion failed because key not found", "key", key)
+			log.V(4).
+				Info("deletion failed because key not found", "key", key)
 			return errors.NewNotFound(resource, obj.GetID())
 		}
-		log.V(4).Info("deletion failed because resourceVersion does not match", "key", key)
+		log.V(4).
+			Info("deletion failed because resourceVersion does not match", "key", key)
 		return errors.NewConflict(resource, obj.GetID(), fmt.Errorf("resourceVersion %d does not match", resourceVersion))
 	}
 	// always not be empty

@@ -6,7 +6,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	commonerrors "xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/selector"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 func TestConvertPredicateSupportsFieldPresenceOperators(t *testing.T) {

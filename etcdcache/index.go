@@ -2,9 +2,10 @@ package etcdcache
 
 import (
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"xiaoshiai.cn/common/store"
+	"xiaoshiai.cn/store"
 )
 
 const ScopeIndex = "scope"
@@ -21,7 +22,7 @@ func ScopeIndexFunc(obj any) ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
-	scopekey := ""
+	var scopekey strings.Builder
 	for _, scope := range scopedlist {
 		if scope == nil {
 			continue
@@ -38,9 +39,9 @@ func ScopeIndexFunc(obj any) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("scope has no name")
 		}
-		scopekey += "/" + resource + "/" + name
+		scopekey.WriteString("/" + resource + "/" + name)
 	}
-	return []string{scopekey}, nil
+	return []string{scopekey.String()}, nil
 }
 
 const NameIndex = "name"

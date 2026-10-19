@@ -116,7 +116,7 @@ func ToDriverValue(v reflect.Value) any {
 	if driver.IsValue(v.Interface()) {
 		return v.Interface()
 	}
-	if valuer, ok := v.Interface().(driver.Valuer); ok {
+	if valuer, ok := reflect.TypeAssert[driver.Valuer](v); ok {
 		return valuer
 	}
 	switch v.Kind() {
@@ -129,7 +129,9 @@ func ToDriverValue(v reflect.Value) any {
 	case reflect.Float32, reflect.Float64:
 		return v.Float()
 	case reflect.Slice:
-		if v.Type().Elem().Kind() == reflect.Uint8 {
+		if v.Type().
+			Elem().
+			Kind() == reflect.Uint8 {
 			return v.Bytes()
 		}
 	case reflect.Bool:
@@ -140,28 +142,6 @@ func ToDriverValue(v reflect.Value) any {
 		return nil
 	}
 	return &JsonValuer{Source: v.Interface()}
-}
-
-// ToReplaceDriverValueMap maps every model column to its driver value, including
-// a field whose omitempty tag would drop a zero value. A replace write owns the
-// whole stored row, so an optional field that came back zero must be written as
-// its zero value instead of leaving the previous stored value in place.
-func (h *ModelCodec) ToReplaceDriverValueMap(target any) (map[string]any, error) {
-	fields, err := h.ModelFields(target)
-	if err != nil {
-		return nil, err
-	}
-	values := map[string]reflect.Value{}
-	h.collectFieldValues(reflect.ValueOf(target), values)
-	result := make(map[string]any, len(fields))
-	for _, field := range fields {
-		value, ok := values[field.Name]
-		if !ok {
-			continue
-		}
-		result[field.Name] = ToDriverValue(value)
-	}
-	return result, nil
 }
 
 // collectFieldValues gathers every model field by representation name, including
@@ -177,7 +157,8 @@ func (h *ModelCodec) collectFieldValues(v reflect.Value, values map[string]refle
 		return
 	}
 	for i := range v.NumField() {
-		structfield := v.Type().Field(i)
+		structfield := v.Type().
+			Field(i)
 		fieldvalue := v.Field(i)
 		isEmbedded, isIgnore, filedName := structFieldInfo(structfield, reflect.Value{})
 		if isIgnore {
@@ -199,12 +180,14 @@ func (h *ModelCodec) collectFieldValues(v reflect.Value, values map[string]refle
 
 func (h *ModelCodec) ScanAll(rows *sql.Rows, dest any) error {
 	value := reflect.ValueOf(dest)
-	if value.Kind() != reflect.Ptr || value.IsNil() || reflect.Indirect(value).Kind() != reflect.Slice {
+	if value.Kind() != reflect.Ptr || value.IsNil() || reflect.Indirect(value).
+		Kind() != reflect.Slice {
 		return errors.New("must pass a pointer to slice")
 	}
 	directslice := reflect.Indirect(value)
 	directslice.SetLen(0)
-	itemtp := directslice.Type().Elem()
+	itemtp := directslice.Type().
+		Elem()
 	for rows.Next() {
 		itemptr := reflect.New(itemtp)
 		if err := h.ScanOne(rows, itemptr.Interface()); err != nil {
@@ -212,8 +195,9 @@ func (h *ModelCodec) ScanAll(rows *sql.Rows, dest any) error {
 		}
 		directslice = reflect.Append(directslice, itemptr.Elem())
 	}
-	value.Elem().Set(directslice)
-	return nil
+	value.Elem().
+		Set(directslice)
+	return rows.Err()
 }
 
 func (h *ModelCodec) ScanOne(rows *sql.Rows, intov any) error {
@@ -242,11 +226,13 @@ func (h *ModelCodec) ScanOne(rows *sql.Rows, intov any) error {
 }
 
 func (h *ModelCodec) scanOneMap(rows *sql.Rows, columns []string, v reflect.Value) error {
-	mapvtype := v.Type().Elem()
+	mapvtype := v.Type().
+		Elem()
 	values := make([]any, 0, len(columns))
 	mapvalues := make([]reflect.Value, 0, len(columns))
 	for range columns {
-		mapv := reflect.New(mapvtype).Elem()
+		mapv := reflect.New(mapvtype).
+			Elem()
 		values = append(values, ToDriverScanner(mapv))
 		mapvalues = append(mapvalues, mapv)
 	}
@@ -276,7 +262,8 @@ func (h *ModelCodec) TrySetTime(v reflect.Value, tim time.Time) {
 	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
-	if v.Kind() == reflect.TypeOf(time.Time{}).Kind() {
+	if v.Kind() == reflect.TypeFor[time.Time]().
+		Kind() {
 		v.Set(reflect.ValueOf(tim))
 	}
 }
@@ -297,7 +284,8 @@ func (i IntScanner) Scan(src any) error {
 		i.Dest.SetZero()
 		return nil
 	}
-	i.Dest.Set(reflect.ValueOf(scanned.Int64).Convert(i.Dest.Type()))
+	i.Dest.Set(reflect.ValueOf(scanned.Int64).
+		Convert(i.Dest.Type()))
 	return nil
 }
 
@@ -316,7 +304,8 @@ func (f FloatScanner) Scan(src any) error {
 		f.Dest.SetZero()
 		return nil
 	}
-	f.Dest.Set(reflect.ValueOf(scanned.Float64).Convert(f.Dest.Type()))
+	f.Dest.Set(reflect.ValueOf(scanned.Float64).
+		Convert(f.Dest.Type()))
 	return nil
 }
 
@@ -354,13 +343,16 @@ func (n *NullTimeScanner) Scan(value any) error {
 	}
 	// The field is a *time.Time or a *meta.Time; build the pointer its own
 	// element type accepts.
-	element := n.val.Type().Elem()
+	element := n.val.Type().
+		Elem()
 	scanned := reflect.New(element)
 	switch element {
 	case metaTimeType:
-		scanned.Elem().Set(reflect.ValueOf(meta.Time{Time: n.inner.Time}))
+		scanned.Elem().
+			Set(reflect.ValueOf(meta.Time{Time: n.inner.Time}))
 	default:
-		scanned.Elem().Set(reflect.ValueOf(n.inner.Time))
+		scanned.Elem().
+			Set(reflect.ValueOf(n.inner.Time))
 	}
 	n.val.Set(scanned)
 	return nil
@@ -433,7 +425,8 @@ func (v JsonScanner) Scan(src any) error {
 	// existing map or struct, which would keep values the stored document no
 	// longer has, so the destination resets first.
 	v.Dest.SetZero()
-	return json.Unmarshal(data, v.Dest.Addr().Interface())
+	return json.Unmarshal(data, v.Dest.Addr().
+		Interface())
 }
 
 type JsonValuer struct {
@@ -449,12 +442,13 @@ func (a JsonValuer) Value() (driver.Value, error) {
 
 // ToDriverScanner converts a struct fields to pointers to a sql.Valuer
 func ToDriverScanner(into reflect.Value) any {
-	if scanner, ok := into.Interface().(sql.Scanner); ok {
+	if scanner, ok := reflect.TypeAssert[sql.Scanner](into); ok {
 		return scanner
 	}
 	switch into.Interface().(type) {
 	case time.Time:
-		return into.Addr().Interface()
+		return into.Addr().
+			Interface()
 	case meta.Time:
 		return &MetaTimeScanner{val: into}
 	case *meta.Time:
@@ -479,7 +473,8 @@ func ToDriverScanner(into reflect.Value) any {
 	case reflect.Float32, reflect.Float64:
 		return &FloatScanner{Dest: into}
 	default:
-		return into.Addr().Interface()
+		return into.Addr().
+			Interface()
 	}
 }
 
@@ -513,7 +508,8 @@ func (h *ModelCodec) FieldMap(v reflect.Value, withinit bool) map[string]reflect
 		for iter.Next() {
 			iterk, iterv := iter.Key(), iter.Value()
 			if iterv.Kind() == reflect.Pointer && iterv.IsNil() && withinit {
-				iterv.Set(reflect.New(iterv.Type().Elem()))
+				iterv.Set(reflect.New(iterv.Type().
+					Elem()))
 			}
 			ret[fmt.Sprintf("%v", iterk.Interface())] = iterv
 		}
@@ -527,7 +523,8 @@ func (h *ModelCodec) FieldMap(v reflect.Value, withinit bool) map[string]reflect
 	for i := range v.NumField() {
 		structfield, fieldvalues := t.Field(i), v.Field(i)
 		if fieldvalues.Kind() == reflect.Pointer && fieldvalues.IsNil() && withinit {
-			fieldvalues.Set(reflect.New(structfield.Type).Elem())
+			fieldvalues.Set(reflect.New(structfield.Type).
+				Elem())
 		}
 		isEmbedded, isIgnore, filedName := structFieldInfo(structfield, fieldvalues)
 		if !withinit && isIgnore {

@@ -58,6 +58,9 @@ preconditionUID、preconditionResourceVersion 传递，与补丁内容分离；M
 顶层 resourceVersion 的含义由 Store 拥有。Client 不把 Unsupported 改为无条件写入，
 也不在 HTTP adapter 中另外维护版本、Generation 或 finalizer。
 
+Update、Patch 与 Status 写入的成功响应只确认操作结果，不返回完整对象，也不补充 Get。
+Create 返回生成的身份与初始元数据。
+
 单对象 Delete 不使用 request body，uid、resourceVersion、propagationPolicy、dryRun、
 labelSelector 和 fieldSelector 通过 query 传递。参数是否出现决定对应前置条件是否存在，
 Server 转换一次后调用底层 Delete；DeleteBatch 使用 dryRun 和 selectors，不接受逐对象

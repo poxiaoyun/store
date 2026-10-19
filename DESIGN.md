@@ -17,10 +17,14 @@ CRUD、Count、精确 Scope、服务端元数据、普通写入与 status 的隔
 属于基础契约。finalizer、版本条件写入、分页、Offset、分页快照、Watch、TTL、DryRun、
 批量操作等行为可以具有不同的后端支持程度；支持的行为必须满足这里规定的语义。
 
-`Capabilities()` 是 backend 级能力概览，不枚举每种资源、字段或选项组合。
-声明支持某类能力不代表支持该类的所有合法输入；具体范围由 backend 的契约定义，并在
-操作入口按自身约束检查。不支持的能力或组合必须在产生副作用前返回 Unsupported，
-不能忽略选项、弱化条件或返回看似成功的部分查询结果。能力声明必须与执行行为一致。
+`Capabilities()` 只描述影响调用方工作方式的三个方向：Watch、Finalizers 与
+OptimisticLock。声明分别承诺快照到实时事件的连续观察、延迟删除生命周期与原子版本
+条件写入。事务通过可选的 `TransactionStore` 接口表达。
+
+查询、分页、投影、TTL、DryRun 和批量请求的支持范围由 backend 定义，不逐项暴露发现
+开关。操作入口按自身约束检查，不支持的功能或组合必须在产生副作用前返回 Unsupported，
+不能忽略选项、弱化条件或返回看似成功的部分查询结果。调用方可以直接请求所需行为，
+无需先查询能力表；能力概览也不替代具体请求校验。
 
 所有资源必须先在 Schema 中注册。`Schema()` 返回独立快照，调用方修改该快照不能影响
 Store；`Scope()` 派生对象提供相同定义的独立快照。Schema 是本地契约，REST adapter
@@ -37,7 +41,9 @@ Schema 注册只验证资源定义，不因某个 backend 缺少可选操作能�
 Name 和 Description 是可修改的展示元数据，不承担唯一身份；APIVersion 仅透传，
 Store 不据此转换对象或选择路由。
 
-对象身份是 Resource、完整有序 Scope 与 ID。相同 ID 可以存在于不同 Scope；UID 区分
+对象通过 Resource、完整有序 Scope 与 ID 定位。ID 的唯一范围由 backend 明确声明：
+可以允许不同 Scope 复用 ID，也可以要求同一资源内跨所有 Scope 唯一；违反唯一范围返回
+AlreadyExists。更严格的 ID 唯一性不改变 Scope 隔离，所有读写仍须匹配请求的完整 Scope。UID 区分
 同一身份位置上的不同对象生命周期。Create 的空 ID 生成 UUID，显式非空 ID 原样保留，
 不增加额外格式要求。ID、UID、Resource、Scopes 与 CreationTimestamp 在创建后不可改写。
 创建时 UID、ResourceVersion、Generation、CreationTimestamp、Resource、Scopes 和
@@ -66,7 +72,8 @@ ResourceVersion 是并发控制版本，成功创建后为正数。持久化内�
 Generation 从 1 开始，只跟踪 ResourceSchema 明确声明的业务字段；没有声明时不跟踪变化。
 一次写入中任一被跟踪字段实际改变，Generation 加一。公共元数据与顶层 status 不得列为
 跟踪字段，未被声明的业务字段变化也不推进 Generation。生命周期合并与字段比较必须保留
-JSON 数值完整精度；等价数值表示不构成变化，字符串与数值不相互转换。
+JSON 数值完整精度；等价数值表示不构成变化，字符串与数值不相互转换。backend 无法准确执行
+声明的跟踪字段时，在绑定 Schema 时拒绝，不能静默忽略或退化为每次写入递增。
 
 Status 是否存在由资源类型决定，对没有 status 的资源执行 Status 写入返回 Unsupported。
 Create 可以初始化 status；普通 Update、Patch 和 PatchBatch 保留存储中的 status。
@@ -91,9 +98,16 @@ Update 对象的 ResourceVersion 为零表示无版本条件，非零表示条�
 UID 条件、selector 和其他已支持条件也不能静默丢弃。
 
 Get 在同一对象快照上判断 selector 与精确前置条件：对象不存在或 selector 不匹配返回
-NotFound，已选中对象的前置条件不匹配返回 Conflict。Patch、Status Patch 和 Delete
-先定位对象，再检查前置条件，最后判断 selector；不存在返回 NotFound，前置条件失败返回
-Conflict，selector 不匹配返回 NotFound。条件之间按 AND 组合，字段投影不能绕过条件。
+NotFound，已选中对象的前置条件不匹配返回 Conflict。单对象写入没有附加条件时，目标不存在
+返回 NotFound；携带版本、UID 或 selector 条件时，目标不存在或条件不匹配统一返回 Conflict。
+JSON Patch test 失败仍属于补丁校验错误。条件之间按 AND 组合，字段投影不能绕过条件。
+
+Create 通过输入对象返回生成的身份和初始元数据。Update、Patch、Status 写入及 Delete 只
+承诺操作结果，不保证刷新输入对象；调用方不能依赖输入对象获得完整持久化结果或最新版本。
+需要读取时显式调用 Get，该读取属于独立快照。adapter 和辅助函数不隐式补充回读。
+
+Patch 的类型和字段范围由 backend 明确限定；支持的请求须完整遵守对应补丁语义。无法准确
+执行时返回 Unsupported，不近似合并，也不以隐藏的逐对象读取模拟未声明的能力。
 
 单对象条件判断、补丁应用、元数据维护和生命周期结果必须原子完成。条件失败不能改变对象、
 推进版本或产生 Watch 事件。实现可以采用原子语句、事务或内部 CAS；调用方固定的前置条件
@@ -219,8 +233,8 @@ type Requirement struct {
 Count 和修改前执行；Watch 使用同一个表达式分别判断旧对象和新对象，再生成成员关系
 转换事件。
 
-`LabelSelector` 和 `FieldSelector` capability 分别描述对应键空间的查询能力；具体字段、
-叶子操作符与布尔组合的支持范围由 backend 定义。只支持较窄外部 selector 协议的 adapter
+Label 和 Field 查询中具体字段、叶子操作符与布尔组合的支持范围由 backend 定义，
+不通过 Capabilities 枚举。只支持较窄外部 selector 协议的 adapter
 只能执行可无损表示的表达式，其余合法请求返回 Unsupported，不能弱化条件。
 Label Requirements 和 Field Requirements 是两个最后用 AND 连接的表达式；一个组合
 节点不能混合 label 键和 field 键。
@@ -276,7 +290,8 @@ Context 控制；Context 结束返回其错误。读取来源由请求契约决�
 ## 契约验证
 
 `store/storetest` 应验证基础契约、声明支持能力的正向行为，以及不支持能力的明确拒绝。
-测试 fixture 提供独立的预期能力，不能仅用被测实现自己的声明跳过所有负向检查。
+测试 fixture 独立声明预期能力与具体请求的支持范围，后者不扩展生产 Capabilities。
+不能根据被测实现的声明或本次请求结果决定跳过测试；不支持的请求也必须验证明确拒绝。
 
 版本前置条件与无变化写入、所有写路径的 Generation/Status/生命周期、TTL 与 finalizer
 互斥、Scope 精确性、分页结束与 token 失效、显式快照、List/Count 谓词一致、唯一约束及

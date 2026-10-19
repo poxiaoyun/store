@@ -33,19 +33,14 @@ type (
 
 	// ListOptions contains the fully resolved execution intent for one Store
 	// List call. Protocol pagination parameters stay in the protocol layer;
-	// callers express either a bounded window or a cursor read.
+	// callers express a limit, an optional initial offset, and an opaque continuation.
 	ListOptions struct {
-		// Offset skips that many matching objects. Values below zero are treated
-		// as zero. It applies only to window reads.
+		// Offset skips matching objects on the initial request; it must be nonnegative.
 		Offset int
-		// Limit bounds the returned objects in both read modes. A zero limit
-		// returns every object from Offset onward in a window read.
+		// Limit bounds the returned objects; zero returns all remaining matches.
 		Limit int
-		// Continue selects a cursor read. A nil Continue performs a window read;
-		// a non-nil Continue requests the batch after the pointed-to token, and
-		// a pointed-to empty token requests the first batch. The backend owns
-		// the token format and its position.
-		Continue *string
+		// Continue is an opaque token from the previous result; empty starts a query.
+		Continue string
 		Search   string
 		// SearchFields overrides the default search fields, id and name.
 		SearchFields []string
@@ -74,6 +69,8 @@ type (
 	}
 
 	CountOptions struct {
+		Search            string
+		SearchFields      []string
 		LabelRequirements Requirements
 		FieldRequirements Requirements
 		IncludeSubScopes  bool
@@ -254,22 +251,30 @@ type Store interface {
 	Count(ctx context.Context, obj Object, opts ...CountOption) (int, error)
 	// Create persists obj in the current scope. It generates missing identity
 	// and server-owned metadata and returns the persisted metadata through obj.
+	// Backends may require IDs to be unique across all scopes of a resource;
+	// duplicates within the backend's declared uniqueness range return AlreadyExists.
 	Create(ctx context.Context, obj Object, opts ...CreateOption) error
 	// Delete requests deletion of obj in the current scope. Background deletion
-	// is the default; finalizers can keep the object in a terminating state.
+	// is the default; supported finalizers keep the object readable while
+	// terminating. Terminating objects cannot acquire new finalizers.
 	Delete(ctx context.Context, obj Object, opts ...DeleteOption) error
 	// DeleteBatch deletes objects of the list's resource that match the supplied
-	// selectors in the current scope.
+	// selectors in the current scope. Each object follows Delete semantics;
+	// an error may leave a partially completed batch.
 	DeleteBatch(ctx context.Context, obj ObjectList, opts ...DeleteBatchOption) error
 	// Update replaces obj while preserving server-owned metadata and status.
+	// Success does not refresh obj; explicitly Get when the persisted result is needed.
 	// ResourceVersion zero is unconditional; a non-zero value is a CAS condition.
 	Update(ctx context.Context, obj Object, opts ...UpdateOption) error
-	// Patch atomically applies patch to the latest stored object. The object's
+	// Patch atomically applies a supported patch to the latest stored object.
+	// Success does not refresh obj. Unsupported formats are rejected without effects.
+	// The object's
 	// ResourceVersion is not a precondition; a non-zero resourceVersion in a
 	// merge patch or a JSON Patch test operation makes the patch conditional.
 	Patch(ctx context.Context, obj Object, patch Patch, opts ...PatchOption) error
 	// PatchBatch applies patch to objects of the list's resource that match the
-	// supplied selectors in the current scope.
+	// supplied selectors in the current scope. Each object follows Patch
+	// semantics, including finalizer completion; a batch may partially succeed.
 	PatchBatch(ctx context.Context, obj ObjectList, patch PatchBatch, opts ...PatchBatchOption) error
 	// Watch observes ordered mutations of the list's resource without silently
 	// dropping events. Delete events contain the complete previous object and
@@ -289,30 +294,17 @@ type Store interface {
 	Scope(scope ...Scope) Store
 }
 
-// Capabilities describes optional Store behavior for discovery. Store methods
-// validate options from their own backend constraints, not from this value.
-// CRUD, Count, exact scopes, server-managed metadata, status isolation,
-// finalizers, ID sorting, and offset/Limit window reads are part of the base
-// contract and are omitted.
+// Capabilities describes the guarantees callers need when choosing observation,
+// deletion and concurrency workflows. Other optional behavior is requested
+// directly; an unsupported request returns Unsupported before side effects.
+// Transaction support is exposed through TransactionStore.
 type Capabilities struct {
-	LabelSelector    bool
-	FieldSelector    bool
-	Search           bool
-	Sort             bool
-	Continue         bool
-	ContinueWithSort bool
-	Projection       bool
-	SubScopes        bool
-	OptimisticLock   bool
-	// Watch reports support for the complete snapshot-to-live Watch contract.
-	Watch            bool
-	DeleteBatch      bool
-	PatchBatch       bool
-	Transaction      bool
-	TTL              bool
-	DryRun           bool
-	SecondaryIndexes bool
-	UniqueIndexes    bool
+	// Watch supports a complete initial snapshot followed by continuous events.
+	Watch bool
+	// Finalizers supports deferred deletion and atomic completion.
+	Finalizers bool
+	// OptimisticLock supports atomic resource-version conditions on writes.
+	OptimisticLock bool
 }
 
 // Pinger reports whether a backend can currently serve requests. Applications
@@ -328,7 +320,9 @@ type PingableStore interface {
 }
 
 type StatusStorage interface {
+	// Update replaces status, preserving other fields. It does not promise to refresh obj.
 	Update(ctx context.Context, obj Object, opts ...UpdateOption) error
+	// Patch applies a supported status patch without promising to refresh obj.
 	Patch(ctx context.Context, obj Object, patch Patch, opts ...PatchOption) error
 }
 

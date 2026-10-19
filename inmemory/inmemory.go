@@ -29,19 +29,7 @@ func (i *InMemory) Schema() *store.Schema {
 
 // Capabilities implements store.Store.
 func (i *InMemory) Capabilities() store.Capabilities {
-	return store.Capabilities{
-		LabelSelector:    true,
-		FieldSelector:    true,
-		Search:           true,
-		Sort:             true,
-		SubScopes:        true,
-		OptimisticLock:   true,
-		Watch:            true,
-		DeleteBatch:      true,
-		PatchBatch:       true,
-		SecondaryIndexes: true,
-		UniqueIndexes:    true,
-	}
+	return store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 }
 
 func New(schema *store.Schema) (*InMemory, error) {
@@ -66,8 +54,15 @@ func (i *InMemory) Ping(context.Context) error {
 // PatchBatch implements store.Store.
 func (i *InMemory) PatchBatch(ctx context.Context, obj store.ObjectList, patch store.PatchBatch, opts ...store.PatchBatchOption) error {
 	options := store.ApplyPatchBatchOptions(opts)
+	if options.DryRun {
+		return errors.NewUnsupported("in-memory store does not support dry-run")
+	}
 	resource, err := store.GetResource(obj)
 	if err != nil {
+		return err
+	}
+	single := store.RawPatch(patch.Type(), patch.Data())
+	if _, err := store.DecodePatch(single, &store.Unstructured{}); err != nil {
 		return err
 	}
 	list := &store.List[store.Unstructured]{Resource: resource}
@@ -81,7 +76,11 @@ func (i *InMemory) PatchBatch(ctx context.Context, obj store.ObjectList, patch s
 	}
 	for index := range list.Items {
 		item := &list.Items[index]
-		if err := i.Patch(ctx, item, store.RawPatch(patch.Type(), patch.Data())); err != nil {
+		uid := item.GetUID()
+		if err := i.Patch(ctx, item, single, store.WithPreconditions(store.Preconditions{UID: &uid}), store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...)); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
 			return err
 		}
 	}
@@ -104,7 +103,7 @@ func (i *InMemory) Count(ctx context.Context, obj store.Object, opts ...store.Co
 			return 0, errors.NewInternalError(err)
 		}
 		if store.MatchLabelReqirements(&item, options.LabelRequirements) &&
-			store.MatchUnstructuredFieldRequirments(&item, options.FieldRequirements) {
+			store.MatchUnstructuredFieldRequirments(&item, options.FieldRequirements) && matchesSearch(&item, options.Search, options.SearchFields) {
 			count++
 		}
 	}
@@ -112,6 +111,13 @@ func (i *InMemory) Count(ctx context.Context, obj store.Object, opts ...store.Co
 }
 
 func (i *InMemory) Create(ctx context.Context, obj store.Object, opts ...store.CreateOption) error {
+	options := store.ApplyCreateOptions(opts)
+	if options.DryRun {
+		return errors.NewUnsupported("in-memory store does not support dry-run")
+	}
+	if options.TTL != 0 {
+		return errors.NewUnsupported("in-memory store does not support TTL")
+	}
 	resource, err := store.GetResource(obj)
 	if err != nil {
 		return err
@@ -128,8 +134,13 @@ func (i *InMemory) Create(ctx context.Context, obj store.Object, opts ...store.C
 	})
 }
 
-func (i *InMemory) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
+func (i *InMemory) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
 	options := store.ApplyDeleteOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || options.Preconditions != nil && (options.Preconditions.UID != nil || options.Preconditions.ResourceVersion != nil)
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("in-memory store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -155,6 +166,9 @@ func (i *InMemory) Delete(ctx context.Context, obj store.Object, opts ...store.D
 
 func (i *InMemory) DeleteBatch(ctx context.Context, obj store.ObjectList, opts ...store.DeleteBatchOption) error {
 	options := store.ApplyDeleteBatchOptions(opts)
+	if options.DryRun {
+		return errors.NewUnsupported("in-memory store does not support dry-run")
+	}
 	resource, err := store.GetResource(obj)
 	if err != nil {
 		return err
@@ -169,7 +183,11 @@ func (i *InMemory) DeleteBatch(ctx context.Context, obj store.ObjectList, opts .
 		return err
 	}
 	for index := range list.Items {
-		if err := i.Delete(ctx, &list.Items[index]); err != nil {
+		item := &list.Items[index]
+		if err := i.Delete(ctx, item, store.WithUID(item.GetUID()), store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...)); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
 			return err
 		}
 	}
@@ -178,6 +196,9 @@ func (i *InMemory) DeleteBatch(ctx context.Context, obj store.ObjectList, opts .
 
 func (i *InMemory) Get(ctx context.Context, name string, obj store.Object, opts ...store.GetOption) error {
 	options := store.ApplyGetOptions(opts)
+	if len(options.Fields) != 0 {
+		return errors.NewUnsupported("in-memory store does not support field projection")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -203,12 +224,18 @@ func (i *InMemory) List(ctx context.Context, list store.ObjectList, opts ...stor
 		return err
 	}
 	options := store.ApplyListOptions(opts)
+	if len(options.Fields) != 0 {
+		return errors.NewUnsupported("in-memory store does not support field projection")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	if options.Continue != nil {
-		return errors.NewUnsupported("in-memory store does not support cursor pagination")
+
+	page, err := store.PrepareListPage(resource, i.scopes, options)
+	if err != nil {
+		return err
 	}
+	options = page.Options
 	items, newItem, err := store.NewItemFuncFromList(list)
 	if err != nil {
 		return err
@@ -254,12 +281,15 @@ func (i *InMemory) List(ctx context.Context, list store.ObjectList, opts ...stor
 	list.SetResource(resource)
 	list.SetScopes(i.scopes)
 	list.SetResourceVersion(int64(i.core.rev.Load()))
-	store.SetWindowListMetadata(list, total)
-	return nil
+	return page.Finish(list)
 }
 
-func (i *InMemory) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
+func (i *InMemory) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
 	options := store.ApplyPatchOptions(opts)
+	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+	if options.DryRun {
+		return errors.NewUnsupported("in-memory store does not support dry-run")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -283,8 +313,16 @@ func (i *InMemory) Patch(ctx context.Context, obj store.Object, patch store.Patc
 	})
 }
 
-func (i *InMemory) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+func (i *InMemory) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
 	options := store.ApplyUpdateOptions(opts)
+	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
+	defer func() { result = store.WriteError(result, obj, conditional) }()
+	if options.DryRun {
+		return errors.NewUnsupported("in-memory store does not support dry-run")
+	}
+	if options.TTL != 0 {
+		return errors.NewUnsupported("in-memory store does not support TTL")
+	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
@@ -451,6 +489,7 @@ func (m *inmemory) get(resource string, scopes []store.Scope, name string, into 
 		return errors.NewNotFound(resource, name)
 	}
 	if into != nil {
+		store.ResetObject(into)
 		if err := json.Unmarshal(kv.value, into); err != nil {
 			return errors.NewInternalError(err)
 		}
@@ -484,9 +523,9 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 	if desired.GetResourceVersion() != 0 && desired.GetResourceVersion() != int64(kv.rev) {
 		return false, errors.NewConflict(resource, desired.GetID(), fmt.Errorf("resourceVersion %d does not match", desired.GetResourceVersion()))
 	}
-	deleted, err := store.PrepareObjectForUpdate(current, desired, status)
+	deleted, err := m.schema.PrepareObjectForUpdate(current, desired, status)
 	if err != nil {
-		return false, errors.NewInternalError(err)
+		return false, err
 	}
 	if deleted {
 		oldIndexValues, err := m.indexValues(resource, scopes, kv.value)
@@ -719,7 +758,7 @@ func (m *inmemory) patch(
 	if err := store.ApplyPatch(desired, into, patch); err != nil {
 		return false, err
 	}
-	deleted, err := store.PrepareObjectForUpdate(current, desired, status)
+	deleted, err := m.schema.PrepareObjectForUpdate(current, desired, status)
 	if err != nil {
 		return false, err
 	}
@@ -911,12 +950,13 @@ func (m *inmemory) removeIndexes(resource, objectKey string, values map[string]s
 }
 
 func getkey(resource string, scopes []store.Scope, name string) string {
-	key := "/" + resource
+	var key strings.Builder
+	key.WriteString("/" + resource)
 	for _, scope := range scopes {
-		key += "/" + scope.Resource + "/" + scope.Name
+		key.WriteString("/" + scope.Resource + "/" + scope.Name)
 	}
-	key += "/" + name
-	return key
+	key.WriteString("/" + name)
+	return key.String()
 }
 
 func getlistkey(resource string, scopes []store.Scope) string {

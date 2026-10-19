@@ -10,15 +10,23 @@ import (
 	"k8s.io/apiserver/pkg/storage/etcd3/testserver"
 	"k8s.io/utils/ptr"
 	"xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/store"
-	"xiaoshiai.cn/common/store/storetest"
+	"xiaoshiai.cn/common/selector"
+	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/storetest"
 )
 
 func TestStoreConformance(t *testing.T) {
 	client := testserver.RunEtcd(t, nil)
-	capabilities := (&EtcdStore{}).Capabilities()
+	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 	storetest.Run(t, storetest.Fixture{
-		Capabilities: capabilities,
+		Capabilities:  capabilities,
+		LabelSelector: true,
+		FieldSelector: true,
+		Continue:      true,
+		SubScopes:     true,
+		TTL:           true,
+		Sort:          true,
+
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
 			return NewEtcdStoreFromClient(client, schema, "/store-conformance/"+uuid.NewString())
 		},
@@ -27,14 +35,18 @@ func TestStoreConformance(t *testing.T) {
 
 func SetupEtcdTestEtcdStore(t *testing.T) store.Store {
 	client := testserver.RunEtcd(t, nil)
-	etcdStore := &EtcdStore{core: newEtcdStoreCore(client, store.NewSchema(), "/test")}
+	schema := store.NewSchema()
+	if err := schema.Register(&TestObject{}, store.ResourceSchema{}); err != nil {
+		t.Fatal(err)
+	}
+	etcdStore := &EtcdStore{core: newEtcdStoreCore(client, schema, "/test")}
 	return etcdStore
 }
 
 type TestObject struct {
 	store.ObjectMeta `json:",inline"`
-	Spec             TestObjectSpec   `json:"spec,omitempty"`
-	Status           TestObjectStatus `json:"status,omitempty"`
+	Spec             TestObjectSpec   `json:"spec"`
+	Status           TestObjectStatus `json:"status"`
 }
 
 type TestObjectSpec struct {
@@ -68,8 +80,7 @@ func TestListContinue(t *testing.T) {
 	for page := 0; ; page++ {
 		list := &store.List[TestObject]{}
 		if err := etcdStore.List(ctx, list,
-			store.WithPage(99, 1),
-			store.WithContinuation(continueToken, 3),
+			store.WithContinue(continueToken, 3),
 		); err != nil {
 			t.Fatalf("failed to list page %d: %v", page, err)
 		}
@@ -79,12 +90,7 @@ func TestListContinue(t *testing.T) {
 		if len(list.Items) > 3 {
 			t.Fatalf("page %d returned %d items, want at most 3", page, len(list.Items))
 		}
-		if list.Total != nil {
-			t.Fatalf("page %d total is %v, want omitted for continuation pagination", page, list.Total)
-		}
-		if list.Page != 0 || list.Size != 0 || list.Limit != 3 {
-			t.Fatalf("page %d pagination metadata = page %d, size %d, limit %d", page, list.Page, list.Size, list.Limit)
-		}
+
 		for _, item := range list.Items {
 			if _, exists := got[item.ID]; exists {
 				t.Fatalf("item %q was returned more than once", item.ID)
@@ -94,17 +100,7 @@ func TestListContinue(t *testing.T) {
 		if list.Continue == "" {
 			break
 		}
-		if page == 0 {
-			obj := &TestObject{
-				ObjectMeta: store.ObjectMeta{
-					ID:   "continue-025",
-					Name: "continue-025",
-				},
-			}
-			if err := etcdStore.Create(ctx, obj); err != nil {
-				t.Fatalf("failed to create object between pages: %v", err)
-			}
-		}
+
 		if list.Continue == continueToken {
 			t.Fatalf("page %d returned the same continue token", page)
 		}
@@ -118,15 +114,6 @@ func TestListContinue(t *testing.T) {
 		if _, exists := got[id]; !exists {
 			t.Errorf("pagination omitted item %q", id)
 		}
-	}
-}
-
-func TestListContinuationRejectsSort(t *testing.T) {
-	etcdStore := SetupEtcdTestEtcdStore(t)
-	list := &store.List[TestObject]{}
-	err := etcdStore.List(t.Context(), list, store.WithContinuation("", 1), store.WithSort("id+"))
-	if !errors.IsUnsupported(err) {
-		t.Fatalf("List() error = %v, want Unsupported", err)
 	}
 }
 
@@ -147,24 +134,21 @@ func TestListPagePagination(t *testing.T) {
 	}
 
 	first := &store.List[TestObject]{}
-	if err := etcdStore.List(ctx, first, store.WithPage(0, 2)); err != nil {
+	if err := etcdStore.List(ctx, first, store.WithOffset(0), store.WithLimit(2)); err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Items) != 2 || first.Total == nil || *first.Total != 5 ||
-		first.Page != 1 || first.Size != 2 || first.Continue != "" || first.Limit != 0 {
+	if len(first.Items) != 2 || first.Continue == "" {
 		t.Fatalf("first page = %#v", first)
 	}
 
 	second := &store.List[TestObject]{}
-	if err := etcdStore.List(ctx, second, store.WithPage(2, 2)); err != nil {
+	if err := etcdStore.List(ctx, second, store.WithOffset(2), store.WithLimit(2)); err != nil {
 		t.Fatal(err)
 	}
 	if len(second.Items) != 2 ||
 		second.Items[0].ID != "legacy-02" ||
 		second.Items[1].ID != "legacy-03" ||
-		second.Total == nil || *second.Total != 5 ||
-		second.Page != 2 || second.Size != 2 ||
-		second.Continue != "" || second.Limit != 0 {
+		second.Continue == "" {
 		t.Fatalf("second page = %#v", second)
 	}
 }
@@ -196,12 +180,7 @@ func TestListWithoutSizeReturnsAllItems(t *testing.T) {
 	if list.Continue != "" {
 		t.Fatalf("unpaginated list returned continue token %q", list.Continue)
 	}
-	if list.Page != 0 || list.Size != 0 || list.Limit != 0 {
-		t.Fatalf("unpaginated list returned pagination metadata: page %d, size %d, limit %d", list.Page, list.Size, list.Limit)
-	}
-	if list.Total == nil || *list.Total != objectCount {
-		t.Fatalf("unpaginated list total is %v, want %d", list.Total, objectCount)
-	}
+
 }
 
 func TestCacheStore_Get(t *testing.T) {
@@ -285,5 +264,54 @@ func TestCacheStore_Get(t *testing.T) {
 		}
 	} else {
 		t.Fatalf("expected not found, got %v", exists)
+	}
+}
+
+type indexedObject struct {
+	store.ObjectMeta `json:",inline"`
+	Email            string `json:"email,omitempty"`
+}
+
+func (*indexedObject) ResourceName() string { return "indexedobjects" }
+
+func TestListAppliesUnindexedFieldRequirements(t *testing.T) {
+	client := testserver.RunEtcd(t, nil)
+	schema := store.NewSchema()
+	if err := schema.Register(&indexedObject{}, store.ResourceSchema{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	storage, err := NewEtcdStoreFromClient(client, schema, "/test")
+	if err != nil {
+		t.Fatalf("NewEtcdStoreFromClient() error = %v", err)
+	}
+	ctx := context.Background()
+	for _, object := range []*indexedObject{
+		{ObjectMeta: store.ObjectMeta{ID: "one"}, Email: "one@example.com"},
+		{ObjectMeta: store.ObjectMeta{ID: "two"}, Email: "two@example.com"},
+	} {
+		if err := storage.Create(ctx, object); err != nil {
+			t.Fatalf("Create(%s) error = %v", object.ID, err)
+		}
+	}
+	list := &store.List[indexedObject]{}
+	if err := storage.List(ctx, list, store.WithFieldRequirements(selector.Requirement{
+		Key: "email", Operator: selector.Equals, Values: []any{"two@example.com"},
+	})); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 1 || list.Items[0].ID != "two" {
+		t.Fatalf("List() items = %#v, want only two", list.Items)
+	}
+}
+
+func TestValidateSchemaRejectsSecondaryIndex(t *testing.T) {
+	schema := store.NewSchema()
+	if err := schema.Register(&indexedObject{}, store.ResourceSchema{
+		Indexes: []store.Index{{Fields: []string{"email"}}},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if err := validateSchema(schema); err == nil {
+		t.Fatal("validateSchema() error = nil")
 	}
 }

@@ -48,9 +48,8 @@ type Object interface {
 	SetOwnerReferences([]OwnerReference)
 }
 
-// ObjectList exposes items and the Store-owned read result: the exact total
-// when the backend computed it, and the opaque cursor token when the backend
-// truncated a cursor read. Protocol pagination parameters are not echoed here.
+// ObjectList exposes items, resource identity, read version and an opaque
+// continuation. Total counts and protocol request parameters are not included.
 type ObjectList interface {
 	GetResource() string
 	SetResource(string)
@@ -61,13 +60,8 @@ type ObjectList interface {
 	GetResourceVersion() int64
 	SetResourceVersion(int64)
 
-	// GetTotal returns the exact total, or nil when the backend did not
-	// compute it, including cursor reads.
-	GetTotal() *int
-	// SetTotal sets or omits the exact total.
-	SetTotal(total *int)
 	// GetContinue returns the opaque next-batch token, or empty when a cursor
-	// traversal is complete or the read was a window read.
+	// traversal is complete.
 	GetContinue() string
 	// SetContinue sets the opaque next-batch token.
 	SetContinue(token string)
@@ -101,7 +95,7 @@ type ObjectMeta struct {
 	Resource          string            `json:"resource,omitempty"`
 	ResourceVersion   int64             `json:"resourceVersion,omitempty"`
 	Generation        int64             `json:"generation,omitempty"`
-	CreationTimestamp meta.Time         `json:"creationTimestamp,omitempty"`
+	CreationTimestamp meta.Time         `json:"creationTimestamp"`
 	DeletionTimestamp *meta.Time        `json:"deletionTimestamp,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
@@ -268,12 +262,11 @@ type List[T any] struct {
 	ResourceVersion int64   `json:"resourceVersion,omitempty"`
 	Scopes          []Scope `json:"scopes,omitempty"`
 	Items           []T     `json:"items" openapi:"dynamic"`
-	Total           *int    `json:"total,omitempty"`
 	Continue        string  `json:"continue,omitempty"` // Used for pagination, if set, indicates that there are more items to list
 }
 
 // PageFromList projects the Store read result onto the public list contract.
-// The backend result supplies items, total, cursor token and resource version;
+// The backend result supplies items, continuation token and resource version;
 // requestOptions supply the protocol echo of the caller's pagination request.
 func PageFromList[T any](list List[T], requestOptions meta.ListOptions) meta.Page[T] {
 	page := 0
@@ -282,7 +275,6 @@ func PageFromList[T any](list List[T], requestOptions meta.ListOptions) meta.Pag
 	}
 	return meta.Page[T]{
 		ResourceVersion: list.ResourceVersion,
-		Total:           list.Total,
 		Items:           list.Items,
 		Page:            page,
 		Size:            requestOptions.Size,
@@ -331,30 +323,6 @@ func (b *List[T]) SetResource(resource string) {
 	b.Resource = resource
 }
 
-// GetTotal implements ObjectList.
-func (b *List[T]) GetTotal() *int {
-	return b.Total
-}
-
-// SetTotal implements ObjectList.
-func (b *List[T]) SetTotal(total *int) {
-	b.Total = total
-}
-
-// SetWindowListMetadata records a bounded window result with an exact total.
-func SetWindowListMetadata(list ObjectList, total int) {
-	list.SetContinue("")
-	list.SetTotal(&total)
-}
-
-// SetCursorListMetadata records a cursor result. An empty token ends the
-// traversal, and the exact total stays unset because the backend did not
-// compute one.
-func SetCursorListMetadata(list ObjectList, continueToken string) {
-	list.SetTotal(nil)
-	list.SetContinue(continueToken)
-}
-
 // ConvertList maps list items while preserving Store and read metadata.
 func ConvertList[T any, F any](list List[T], f func(T) F) List[F] {
 	newItems := make([]F, 0, len(list.Items))
@@ -365,7 +333,6 @@ func ConvertList[T any, F any](list List[T], f func(T) F) List[F] {
 		Resource:        list.Resource,
 		ResourceVersion: list.ResourceVersion,
 		Scopes:          list.Scopes,
-		Total:           list.Total,
 		Items:           newItems,
 		Continue:        list.Continue,
 	}

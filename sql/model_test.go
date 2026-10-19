@@ -1,14 +1,42 @@
 package sql
 
 import (
+	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"xiaoshiai.cn/common/meta"
+	testpostgresql "xiaoshiai.cn/common/testkit/postgresql"
 	"xiaoshiai.cn/store"
 )
+
+func TestScanAllReturnsRowStreamError(t *testing.T) {
+	db, err := sql.Open("pgx", testpostgresql.RequireURI(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// PostgreSQL produces one row before evaluating division by zero. Query
+	// succeeds; consuming the row stream must still report the execution error.
+	rows, err := db.QueryContext(t.Context(), "SELECT 1/(2-x) AS value FROM generate_series(1,2) x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var result []struct {
+		Value int `json:"value"`
+	}
+	codec := NewModelCodec()
+	err = codec.ScanAll(rows, &result)
+	var databaseError *pgconn.PgError
+	if !errors.As(err, &databaseError) || databaseError.Code != "22012" {
+		t.Fatalf("ScanAll = %v, want database division-by-zero error", err)
+	}
+}
 
 type timestampObject struct {
 	store.ObjectMeta `json:",inline"`

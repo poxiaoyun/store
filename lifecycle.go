@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,33 @@ func ValidatePreconditions(obj Object, preconditions *Preconditions) error {
 	return nil
 }
 
+// WriteError maps an unmatched conditional mutation to Conflict. Read operations
+// retain NotFound; adapters call this only at a single-object write boundary.
+func WriteError(err error, obj Object, conditional bool) error {
+	if !conditional || !errors.IsNotFound(err) {
+		return err
+	}
+	resource, resourceErr := GetResource(obj)
+	if resourceErr != nil {
+		return resourceErr
+	}
+	return errors.NewConflict(resource, obj.GetID(), fmt.Errorf("write conditions did not match"))
+}
+
+// PatchWriteError includes conditions embedded in a patch when classifying an
+// unmatched write. Successful writes never decode the patch again.
+func PatchWriteError(err error, obj Object, patch Patch, options PatchOptions) error {
+	if !errors.IsNotFound(err) {
+		return err
+	}
+	decoded, decodeErr := DecodePatch(patch, obj)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	conditional := decoded.Version != 0 || len(decoded.Tests) > 0 || len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || options.Preconditions != nil && (options.Preconditions.UID != nil || options.Preconditions.ResourceVersion != nil)
+	return WriteError(err, obj, conditional)
+}
+
 // ValidateDeleteRequirements checks caller-supplied object selectors.
 func ValidateDeleteRequirements(obj Object, labelRequirements, fieldRequirements Requirements) error {
 	if err := ValidateSelectorRequirements(labelRequirements, fieldRequirements); err != nil {
@@ -62,7 +90,22 @@ func ValidateDeleteRequirements(obj Object, labelRequirements, fieldRequirements
 // PrepareObjectForUpdate applies replacement or status-subresource semantics
 // to desired. It returns true when removing the final finalizer completes a
 // previously requested deletion.
-func PrepareObjectForUpdate(current, desired Object, status bool) (bool, error) {
+func (s *Schema) PrepareObjectForUpdate(current, desired Object, status bool) (bool, error) {
+	resource, err := GetResource(current)
+	if err != nil {
+		return false, err
+	}
+	definition, err := s.Resource(resource)
+	if err != nil {
+		return false, err
+	}
+	if !status && current.GetDeletionTimestamp() != nil {
+		for _, finalizer := range desired.GetFinalizers() {
+			if !slices.Contains(current.GetFinalizers(), finalizer) {
+				return false, errors.NewBadRequest("cannot add finalizers to a terminating object")
+			}
+		}
+	}
 	currentMap, err := ObjectToMap(current)
 	if err != nil {
 		return false, err
@@ -93,8 +136,11 @@ func PrepareObjectForUpdate(current, desired Object, status bool) (bool, error) 
 			}
 		}
 		generation := current.GetGeneration()
-		if !ObjectBusinessFieldsEqual(currentMap, desiredMap) {
-			generation++
+		for _, field := range definition.GenerationFields {
+			if !objectJSONValuesEqual(generationField(currentMap, field), generationField(desiredMap, field)) {
+				generation++
+				break
+			}
 		}
 		result["generation"] = generation
 	}
@@ -109,9 +155,24 @@ func PrepareObjectForUpdate(current, desired Object, status bool) (bool, error) 
 	return current.GetDeletionTimestamp() != nil && len(desired.GetFinalizers()) == 0, nil
 }
 
+func generationField(object map[string]any, field string) any {
+	var value any = object
+	for part := range strings.SplitSeq(field, ".") {
+		fields, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		value = fields[part]
+	}
+	return value
+}
+
 // PrepareObjectForDelete applies propagation finalizers and the immutable
 // deletion timestamp. It returns true when the object can be deleted now.
 func PrepareObjectForDelete(obj Object, policy DeletionPropagation) bool {
+	if obj.GetDeletionTimestamp() != nil {
+		return len(obj.GetFinalizers()) == 0
+	}
 	finalizers := obj.GetFinalizers()
 	switch policy {
 	case DeletePropagationForeground:
@@ -182,13 +243,6 @@ func ServerOwnedUpdateFields() []string {
 	return slices.Clone(serverOwnedUpdateFields)
 }
 
-// ObjectBusinessFieldsEqual compares the business fields of two ObjectToMap
-// results using exact JSON numeric equality, without coercing other JSON types.
-// Equivalent numeric spellings do not advance Generation.
-func ObjectBusinessFieldsEqual(current, desired map[string]any) bool {
-	return objectJSONValuesEqual(ObjectBusinessFields(current), ObjectBusinessFields(desired))
-}
-
 func objectJSONValuesEqual(left, right any) bool {
 	switch left := left.(type) {
 	case json.Number:
@@ -227,17 +281,6 @@ func objectJSONValuesEqual(left, right any) bool {
 	default:
 		return reflect.DeepEqual(left, right)
 	}
-}
-
-// ObjectBusinessFields returns fields that participate in Generation changes.
-func ObjectBusinessFields(object map[string]any) map[string]any {
-	result := make(map[string]any, len(object))
-	for key, value := range object {
-		if !slices.Contains(objectMetaFields, key) && key != "status" {
-			result[key] = value
-		}
-	}
-	return result
 }
 
 var serverOwnedUpdateFields = []string{
