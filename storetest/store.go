@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	commonerrors "xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/selector"
 	commonstore "xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 // Object is the resource used by the conformance suite.

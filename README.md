@@ -99,7 +99,7 @@ TTL 与 finalizer 不能共存。原生 etcd 支持 Create 和普通 Update 设�
 
 ## 组合查询条件
 
-查询表达式由共享的 [`selector`](../selector) 包定义，Store 通过
+查询表达式由本项目的 [`selector`](./selector/README.md) 包定义，Store 通过
 `store.Requirements` alias 暴露条件集合。`Requirements` 中的顶层条件按 AND
 组合。一个 `Requirement` 也可以用
 `And`、`Or` 和 `Not` 递归组合子条件。例如：

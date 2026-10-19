@@ -9,7 +9,7 @@ import (
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/meta"
 
-	"xiaoshiai.cn/common/selector"
+	"xiaoshiai.cn/store/selector"
 )
 
 // metaListOption is the parsed public portion of ListOptions. It intentionally

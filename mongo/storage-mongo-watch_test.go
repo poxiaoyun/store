@@ -8,9 +8,9 @@ import (
 	"time"
 
 	commonerrors "xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/selector"
 	testmongodb "xiaoshiai.cn/common/testkit/mongodb"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 type Message struct {

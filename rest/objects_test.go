@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 type objectAdapterStore struct {

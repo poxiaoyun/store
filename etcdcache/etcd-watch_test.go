@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"go.etcd.io/etcd/client/v3/kubernetes"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 func testEtcdCacherWatch(t *testing.T, client *kubernetes.Client) {

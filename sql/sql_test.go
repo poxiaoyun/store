@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	commonerrors "xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/selector"
 	testmysql "xiaoshiai.cn/common/testkit/mysql"
 	testpostgresql "xiaoshiai.cn/common/testkit/postgresql"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 	"xiaoshiai.cn/store/storetest"
 )
 

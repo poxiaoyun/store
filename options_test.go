@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"xiaoshiai.cn/common/selector"
+	"xiaoshiai.cn/store/selector"
 )
 
 func TestApplyListOptionsComposesInOrder(t *testing.T) {

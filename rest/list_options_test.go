@@ -8,9 +8,9 @@ import (
 
 	commonerrors "xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/meta"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
 	storerest "xiaoshiai.cn/store/rest"
+	"xiaoshiai.cn/store/selector"
 )
 
 func TestListOptionsFromRequestRejectsMalformedRequirements(t *testing.T) {

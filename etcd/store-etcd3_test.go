@@ -10,8 +10,8 @@ import (
 	"k8s.io/apiserver/pkg/storage/etcd3/testserver"
 	"k8s.io/utils/ptr"
 	"xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 	"xiaoshiai.cn/store/storetest"
 )
 

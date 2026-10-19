@@ -3,8 +3,8 @@ package store_test
 import (
 	"testing"
 
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 func TestMatchUnstructuredFieldRequirements(t *testing.T) {

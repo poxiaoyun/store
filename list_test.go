@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"xiaoshiai.cn/common/meta"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 func TestListOptionsFromMeta(t *testing.T) {

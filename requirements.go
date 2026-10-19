@@ -7,10 +7,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
-	"xiaoshiai.cn/common/selector"
+	"xiaoshiai.cn/store/selector"
 )
 
-// Requirements is the Store-facing alias for shared selector requirements.
+// Requirements is the Store-facing alias for this module's selector requirements.
 type Requirements = selector.Requirements
 
 // NewCreationRangeRequirement constructs the non-zero inclusive creation-time
@@ -31,7 +31,8 @@ func LabelsSelectorToReqirements(source labels.Selector) Requirements {
 	requirements, _ := source.Requirements()
 	result := make(Requirements, 0, len(requirements))
 	for _, requirement := range requirements {
-		values := requirement.Values().List()
+		values := requirement.Values().
+			List()
 		operands := make([]any, len(values))
 		for index, value := range values {
 			operands[index] = value

@@ -9,9 +9,9 @@ import (
 
 	commonerrors "xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/rest/api"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
 	"xiaoshiai.cn/store/inmemory"
+	"xiaoshiai.cn/store/selector"
 	"xiaoshiai.cn/store/storetest"
 )
 

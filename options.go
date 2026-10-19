@@ -6,7 +6,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
-	"xiaoshiai.cn/common/selector"
+	"xiaoshiai.cn/store/selector"
 )
 
 // SendInitialEventsOption enables the initial snapshot phase of a Watch.

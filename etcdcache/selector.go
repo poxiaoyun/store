@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apiserver/pkg/storage"
 	commonerrors "xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 func ConvertPredicate(l store.Requirements, f store.Requirements) (storage.SelectionPredicate, error) {

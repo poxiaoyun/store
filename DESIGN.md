@@ -197,7 +197,7 @@ option。标量按声明顺序覆盖，requirements 按顺序追加。`ApplyXxxO
 
 Labels 和 Annotations 必须无损保存，包括含 `.`, `/` 或 `$` 的键。声明 `LabelSelector` 的实现必须直接按 Requirement 的键匹配，不能因底层数据库路径语法或 Kubernetes label parser 改变键的含义。Annotations 不自动成为 label selector。
 
-本项目 `selector.Requirement` 定义递归的布尔选择条件。
+本项目 [`selector`](./selector/DESIGN.md) 包（`xiaoshiai.cn/store/selector`）定义递归的布尔选择条件。
 `store.Requirements = selector.Requirements` 是 Store API 和各 backend
 直接使用的集合类型别名；selector 是表达式语义的唯一 owner。顶层 Requirements 按
 AND 组合，其中每个 Requirement 可以是常量、组合节点或一个键上的叶子条件：

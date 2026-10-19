@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"xiaoshiai.cn/common/errors"
-	"xiaoshiai.cn/common/selector"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/selector"
 )
 
 // joinRequirementExpressions renders requirements and returns them joined, so a
