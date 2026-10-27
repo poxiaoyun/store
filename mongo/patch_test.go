@@ -238,9 +238,46 @@ func TestMongoFieldPatchOrderedOverlap(t *testing.T) {
 	}
 }
 
+func TestMongoFieldPatchExpression(t *testing.T) {
+	database := RequireIntegrationDatabase(t, testmongodb.RequireURI(t))
+	storage := newFieldPatchStorage(t, database)
+	object := &fieldPatchObject{
+		ObjectMeta: store.ObjectMeta{ID: "expression"},
+		Balance:    100,
+		Note:       "debit",
+	}
+	if err := storage.Create(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+	arithmetic := store.Cond(
+		store.Eq(store.Field("note"), store.Literal("debit")),
+		store.Add(store.Field("balance"), store.Literal(int64(10))),
+		store.Sub(store.Field("balance"), store.Literal(int64(10))),
+	)
+	fallback := store.IfNull(store.Field("missing"), store.Literal("fallback"))
+	if err := storage.Patch(t.Context(), object, store.FieldPatch{Operations: []store.FieldOperation{
+		{Op: store.FieldOpExpr, Path: "balance", Expr: &arithmetic},
+		{Op: store.FieldOpExpr, Path: "note", Expr: &fallback},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := &fieldPatchObject{}
+	if err := storage.Get(t.Context(), object.ID, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Balance != 110 || got.Note != "fallback" {
+		t.Fatalf("expression patch result: %#v", got)
+	}
+	if got.Generation != 2 || got.ResourceVersion != 2 {
+		t.Fatalf("expression patch metadata: %#v", got)
+	}
+}
+
 func TestMongoValidateFieldPatch(t *testing.T) {
 	storage := &MongoStorage{}
 	definition := store.ResourceSchema{Object: &fieldPatchObject{}, StatusResource: true}
+	validExpr := store.Add(store.Field("balance"), store.Literal(int64(1)))
+	invalidExpr := store.Expr{Op: store.ExprAdd, Args: []store.Expr{store.Literal(int64(1))}}
 	tests := []struct {
 		name    string
 		op      store.FieldOperation
@@ -254,6 +291,10 @@ func TestMongoValidateFieldPatch(t *testing.T) {
 		{"status through resource", store.FieldOperation{Op: store.FieldOpSet, Path: "status.phase", Value: "ready"}, false, true},
 		{"status through status", store.FieldOperation{Op: store.FieldOpSet, Path: "status.phase", Value: "ready"}, true, false},
 		{"business through status", store.FieldOperation{Op: store.FieldOpSet, Path: "balance", Value: int64(1)}, true, true},
+		{"expression", store.FieldOperation{Op: store.FieldOpExpr, Path: "balance", Expr: &validExpr}, false, false},
+		{"expression without expr", store.FieldOperation{Op: store.FieldOpExpr, Path: "balance"}, false, true},
+		{"invalid expression", store.FieldOperation{Op: store.FieldOpExpr, Path: "balance", Expr: &invalidExpr}, false, true},
+		{"expression on resource version", store.FieldOperation{Op: store.FieldOpExpr, Path: "resourceVersion", Expr: &validExpr}, false, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -266,11 +307,14 @@ func TestMongoValidateFieldPatch(t *testing.T) {
 }
 
 func TestBuildFieldPatchUpdate(t *testing.T) {
-	classic := buildFieldPatchUpdate([]store.FieldOperation{
+	classic, err := buildFieldPatchUpdate([]store.FieldOperation{
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-30")},
 		{Op: store.FieldOpSet, Path: "note", Value: "new"},
 		{Op: store.FieldOpUnset, Path: "old"},
 	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	document, ok := classic.(bson.D)
 	if !ok {
 		t.Fatalf("classic update type: %T", classic)
@@ -278,10 +322,13 @@ func TestBuildFieldPatchUpdate(t *testing.T) {
 	if len(document) != 3 {
 		t.Fatalf("classic update: %#v", document)
 	}
-	generated := buildFieldPatchUpdate([]store.FieldOperation{
+	generated, err := buildFieldPatchUpdate([]store.FieldOperation{
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-30")},
 		{Op: store.FieldOpSet, Path: "note", Value: "new"},
 	}, []string{"balance"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	pipeline, ok := generated.(mongo.Pipeline)
 	if !ok {
 		t.Fatalf("generation update type: %T", generated)
@@ -292,15 +339,51 @@ func TestBuildFieldPatchUpdate(t *testing.T) {
 	if pipeline[0][0].Key != "$set" || pipeline[len(pipeline)-1][0].Key != "$unset" {
 		t.Fatalf("generation pipeline stages: %#v", pipeline)
 	}
-	ordered := buildFieldPatchUpdate([]store.FieldOperation{
+	ordered, err := buildFieldPatchUpdate([]store.FieldOperation{
 		{Op: store.FieldOpSet, Path: "balance", Value: json.Number("10")},
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("5")},
 	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	orderedPipeline, ok := ordered.(mongo.Pipeline)
 	if !ok {
 		t.Fatalf("ordered update type: %T", ordered)
 	}
 	if len(orderedPipeline) != 3 {
 		t.Fatalf("ordered pipeline: %#v", orderedPipeline)
+	}
+}
+
+func TestBuildFieldPatchUpdateExpression(t *testing.T) {
+	expr := store.Cond(
+		store.Eq(store.Field("normalSide"), store.Literal("debit")),
+		store.Add(store.Field("available"), store.Literal(int64(10))),
+		store.Sub(store.Field("available"), store.Literal(int64(10))),
+	)
+	update, err := buildFieldPatchUpdate([]store.FieldOperation{
+		{Op: store.FieldOpExpr, Path: "available", Expr: &expr},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline, ok := update.(mongo.Pipeline)
+	if !ok {
+		t.Fatalf("expression update type: %T", update)
+	}
+	if len(pipeline) != 2 {
+		t.Fatalf("expression pipeline: %#v", pipeline)
+	}
+	stage := pipeline[0]
+	if len(stage) != 1 || stage[0].Key != "$set" {
+		t.Fatalf("expression stage: %#v", stage)
+	}
+	set, ok := stage[0].Value.(bson.D)
+	if !ok || len(set) != 1 || set[0].Key != "available" {
+		t.Fatalf("expression set: %#v", stage[0].Value)
+	}
+	cond, ok := set[0].Value.(bson.D)
+	if !ok || len(cond) != 1 || cond[0].Key != "$cond" {
+		t.Fatalf("expression value: %#v", set[0].Value)
 	}
 }

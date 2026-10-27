@@ -129,6 +129,9 @@ const (
 	// FieldOpInc adds Value to the numeric value at Path. A missing path takes
 	// the increment as its initial value.
 	FieldOpInc FieldOperator = "inc"
+	// FieldOpExpr sets Path to Expr evaluated against the stored object. The
+	// expression may reference the current values of other fields.
+	FieldOpExpr FieldOperator = "expr"
 )
 
 // FieldOperation is one relative mutation in a FieldPatch.
@@ -137,14 +140,18 @@ type FieldOperation struct {
 	// Path is a dot-separated business field path.
 	Path string `json:"path"`
 	// Value is the new value for set and the increment for inc. It is ignored
-	// by unset and may be null for set.
+	// by unset and expr and may be null for set.
 	Value any `json:"value,omitempty"`
+	// Expr is evaluated against the stored object to produce the new value at
+	// Path when Op is expr. It is ignored by other operations.
+	Expr *Expr `json:"expr,omitempty"`
 }
 
 // FieldPatch applies relative field operations to the latest stored object.
 // Operations are applied in order, so a later operation observes the result of
-// earlier ones. Because the operations carry deltas instead of values computed
-// from a prior read, a backend can apply them in one native write.
+// earlier ones. Because the operations carry deltas or expressions instead of
+// values computed from a prior read, a backend can apply them in one native
+// write.
 type FieldPatch struct {
 	// Operations are applied in order.
 	Operations []FieldOperation `json:"operations"`

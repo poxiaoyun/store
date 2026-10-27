@@ -65,6 +65,24 @@ err := storage.Patch(ctx, account, store.FieldPatch{Operations: []store.FieldOpe
 `nested.count`）。字段补丁是可选能力，是否支持某个路径由具体 backend 决定；不支持时
 必须拒绝整个 patch，不能产生部分效果。
 
+新值依赖存储中的其他字段时，用 `FieldOpExpr` 把计算交给 backend，同样不需要先读取：
+
+```go
+total := store.Cond(
+  store.Gt(store.Field("quantity"), store.Literal(int64(0))),
+  store.Add(store.Field("total"), store.Mul(store.Field("price"), store.Field("quantity"))),
+  store.Field("total"),
+)
+err := storage.Patch(ctx, order, store.FieldPatch{Operations: []store.FieldOperation{
+  {Op: store.FieldOpExpr, Path: "total", Expr: &total},
+}})
+```
+
+`Expr` 是 backend 无关的表达式树，只能引用存储中的字段与字面量；字段引用使用与
+`FieldPatch` 的 `Path` 相同的点分隔语法。表达式在同一次原子写入中按写前的存储值求值，
+支持算术、比较、布尔组合、`cond` 和 `ifNull`，具体 backend 是否支持由实现决定，不支持
+时返回 Unsupported。
+
 ## 查询与错误
 
 List 使用 `WithLimit`、`WithContinue` 和 `WithOffset`。正数 Limit 限制本批数量，

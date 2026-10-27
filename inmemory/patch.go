@@ -126,6 +126,8 @@ func DecodeFieldPatch(data []byte) ([]store.FieldOperation, error) {
 			if _, _, _, ok := parseFieldNumber(operation.Value); !ok {
 				return nil, errors.NewBadRequest("inc value must be a number")
 			}
+		case store.FieldOpExpr:
+			return nil, errors.NewUnsupported("field patch expression is not supported")
 		default:
 			return nil, errors.NewBadRequest(fmt.Sprintf("invalid field patch op: %s", operation.Op))
 		}

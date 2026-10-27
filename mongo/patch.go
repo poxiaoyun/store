@@ -157,7 +157,10 @@ func (m *MongoStorage) applyFieldOperations(ctx context.Context, obj store.Objec
 				filter = append(filter, bson.E{Key: "resourceVersion", Value: *preconditions.ResourceVersion})
 			}
 		}
-		update := buildFieldPatchUpdate(operations, generationPaths)
+		update, err := buildFieldPatchUpdate(operations, generationPaths)
+		if err != nil {
+			return err
+		}
 		result := col.FindOneAndUpdate(ctx, filter, update,
 			mongooptions.FindOneAndUpdate().SetReturnDocument(mongooptions.After))
 		if err := result.Err(); err != nil {
@@ -195,6 +198,14 @@ func (m *MongoStorage) validateFieldPatch(definition store.ResourceSchema, opera
 	}
 	forbidden := append(serverOwnedUpdateFields, "generation", "finalizers")
 	for _, operation := range operations {
+		if operation.Op == store.FieldOpExpr && operation.Expr == nil {
+			return errors.NewBadRequest("field patch expression is required")
+		}
+		if operation.Expr != nil {
+			if err := operation.Expr.Validate(); err != nil {
+				return err
+			}
+		}
 		if status {
 			if !fieldPathTouches(operation.Path, "status") {
 				return errors.NewBadRequest("status patch may only modify status")
@@ -212,18 +223,28 @@ func (m *MongoStorage) validateFieldPatch(definition store.ResourceSchema, opera
 }
 
 // buildFieldPatchUpdate uses a classic update document only when operations
-// are disjoint and no business field is touched. Overlapping paths need one
-// pipeline stage per operation so the declared order is preserved.
-func buildFieldPatchUpdate(operations []store.FieldOperation, generationPaths []string) any {
-	if len(generationPaths) == 0 && !fieldPatchOperationsOverlap(operations) {
-		return buildClassicFieldPatch(operations)
+// are disjoint, no business field is touched, and no operation needs an
+// expression. Overlapping paths and expressions need one pipeline stage per
+// operation so the declared order and the stored values are observed.
+func buildFieldPatchUpdate(operations []store.FieldOperation, generationPaths []string) (any, error) {
+	if len(generationPaths) == 0 && !fieldPatchOperationsOverlap(operations) && !fieldPatchHasExpression(operations) {
+		return buildClassicFieldPatch(operations), nil
 	}
 	return buildOrderedFieldPatch(operations, generationPaths)
 }
 
+func fieldPatchHasExpression(operations []store.FieldOperation) bool {
+	for _, operation := range operations {
+		if operation.Op == store.FieldOpExpr {
+			return true
+		}
+	}
+	return false
+}
+
 func fieldPatchOperationsOverlap(operations []store.FieldOperation) bool {
 	for index := range operations {
-		for previous := 0; previous < index; previous++ {
+		for previous := range index {
 			if fieldPathTouches(operations[index].Path, operations[previous].Path) {
 				return true
 			}
@@ -261,7 +282,7 @@ func buildClassicFieldPatch(operations []store.FieldOperation) bson.D {
 // overlapping paths observe the results of earlier operations. Business paths
 // are saved before the operations and Generation advances only if one of them
 // actually changed. The whole pipeline is one atomic update.
-func buildOrderedFieldPatch(operations []store.FieldOperation, generationPaths []string) mongo.Pipeline {
+func buildOrderedFieldPatch(operations []store.FieldOperation, generationPaths []string) (mongo.Pipeline, error) {
 	sentinel := primitive.NewObjectID()
 	pipeline := mongo.Pipeline{}
 	if len(generationPaths) > 0 {
@@ -290,13 +311,24 @@ func buildOrderedFieldPatch(operations []store.FieldOperation, generationPaths [
 					value,
 				}}}},
 			}}})
+		case store.FieldOpExpr:
+			if operation.Expr == nil {
+				return nil, errors.NewBadRequest("field patch expression is required")
+			}
+			compiled, err := buildExpr(*operation.Expr)
+			if err != nil {
+				return nil, err
+			}
+			pipeline = append(pipeline, bson.D{{Key: "$set", Value: bson.D{
+				{Key: operation.Path, Value: compiled},
+			}}})
 		}
 	}
 	pipeline = append(pipeline, bson.D{{Key: "$set", Value: bson.D{
 		{Key: "resourceVersion", Value: bson.D{{Key: "$add", Value: bson.A{"$resourceVersion", int64(1)}}}},
 	}}})
 	if len(generationPaths) == 0 {
-		return pipeline
+		return pipeline, nil
 	}
 	changes := bson.A{}
 	for index, field := range generationPaths {
@@ -313,7 +345,7 @@ func buildOrderedFieldPatch(operations []store.FieldOperation, generationPaths [
 		}}}}}}},
 		bson.D{{Key: "$unset", Value: "__store_generation"}},
 	)
-	return pipeline
+	return pipeline, nil
 }
 
 func fieldPathTouches(path, field string) bool {
@@ -367,6 +399,13 @@ func decodeFieldPatch(data []byte) ([]store.FieldOperation, error) {
 		case store.FieldOpInc:
 			if !fieldPatchNumber(operation.Value) {
 				return nil, errors.NewBadRequest("inc value must be a number")
+			}
+		case store.FieldOpExpr:
+			if operation.Expr == nil {
+				return nil, errors.NewBadRequest("field patch expression is required")
+			}
+			if err := operation.Expr.Validate(); err != nil {
+				return nil, err
 			}
 		default:
 			return nil, errors.NewBadRequest(fmt.Sprintf("invalid field patch op: %s", operation.Op))

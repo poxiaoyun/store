@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	commonerrors "xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
 
@@ -119,6 +120,20 @@ func TestFieldPatchIncrementRejectsNonNumericTarget(t *testing.T) {
 	}}
 	if err := ApplyPatch(object, object, patch); err == nil {
 		t.Fatal("incrementing a string field was accepted")
+	}
+}
+
+func TestFieldPatchExpressionUnsupported(t *testing.T) {
+	object := &fieldPatchTestObject{
+		ObjectMeta: store.ObjectMeta{ResourceVersion: 1},
+		Balance:    10,
+	}
+	expr := store.Add(store.Field("balance"), store.Literal(int64(1)))
+	err := ApplyPatch(object, object, store.FieldPatch{Operations: []store.FieldOperation{
+		{Op: store.FieldOpExpr, Path: "balance", Expr: &expr},
+	}})
+	if !commonerrors.IsUnsupported(err) {
+		t.Fatalf("expression patch: %v", err)
 	}
 }
 

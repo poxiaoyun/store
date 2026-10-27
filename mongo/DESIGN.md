@@ -24,8 +24,10 @@ add、replace 与 remove；test、copy 和 move 返回 Unsupported，路径按�
 
 Field Patch 的 operations 按数组顺序生效。路径互不重叠且不涉及业务字段时使用单个
 update document（`$set`、`$unset`、`$inc` 和 `resourceVersion`）；否则每个操作对应
-一个 pipeline stage，以保留声明顺序。服务端拥有的字段、generation 和 finalizers 不能
-通过字段补丁修改，status 只能通过 `Status()` 修改。
+一个 pipeline stage，以保留声明顺序。`FieldOpExpr` 总是使用 pipeline，把
+`store.Expr` 编译为 aggregation expression 后在同一次写入中按存储值求值。
+服务端拥有的字段、generation 和 finalizers 不能通过字段补丁修改，status 只能通过
+`Status()` 修改。
 
 补丁的 filter 同时携带 selector 与前置条件，条件判断和写入是单文档原子操作。写入未
 命中时，目标不存在返回 NotFound，存在但不满足条件返回 Conflict。
