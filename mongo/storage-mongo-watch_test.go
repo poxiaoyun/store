@@ -17,10 +17,6 @@ type Message struct {
 	store.ObjectMeta `json:",inline"`
 }
 
-func (*Message) ResourceName() string {
-	return "messages"
-}
-
 func TestMongoStorageWatchIntegration(t *testing.T) {
 	uri := testmongodb.RequireURI(t)
 	database := RequireIntegrationDatabase(t, uri)
@@ -164,7 +160,11 @@ func TestMongoStorageInitialBookmarkIncludesChangesDuringSnapshot(t *testing.T) 
 }
 
 func TestMongoStorageWatchReturnsResourceExpiredForUnavailableVersion(t *testing.T) {
-	storage := &MongoStorage{}
+	schema := store.NewSchema()
+	if err := schema.Register(&Message{}, store.ResourceSchema{ResourceName: "messages"}); err != nil {
+		t.Fatal(err)
+	}
+	storage := &MongoStorage{core: &MongoStorageCore{schema: schema}}
 
 	_, err := storage.Watch(t.Context(), &store.List[Message]{}, store.WithResourceVersion(1))
 	if !commonerrors.IsResourceExpired(err) {

@@ -64,7 +64,7 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // PatchBatch implements store.Store.
 func (c *Client) PatchBatch(ctx context.Context, obj store.ObjectList, patch store.PatchBatch, opts ...store.PatchBatchOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -90,7 +90,7 @@ func (c *Client) PatchBatch(ctx context.Context, obj store.ObjectList, patch sto
 
 // DeleteBatch implements store.Store.
 func (c *Client) DeleteBatch(ctx context.Context, obj store.ObjectList, opts ...store.DeleteBatchOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -110,7 +110,7 @@ func (c *Client) DeleteBatch(ctx context.Context, obj store.ObjectList, opts ...
 
 // Count implements store.Store.
 func (c Client) Count(ctx context.Context, obj store.Object, opts ...store.CountOption) (int, error) {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return 0, errors.NewBadRequest(err.Error())
 	}
@@ -139,7 +139,7 @@ func (c Client) Count(ctx context.Context, obj store.Object, opts ...store.Count
 
 // Create implements store.Store.
 func (c Client) Create(ctx context.Context, obj store.Object, opts ...store.CreateOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -164,7 +164,7 @@ func (c Client) Create(ctx context.Context, obj store.Object, opts ...store.Crea
 
 // Delete implements store.Store.
 func (c Client) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -200,7 +200,7 @@ func (c Client) Delete(ctx context.Context, obj store.Object, opts ...store.Dele
 
 // Get implements store.Store.
 func (c Client) Get(ctx context.Context, name string, obj store.Object, opts ...store.GetOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -228,7 +228,7 @@ func (c Client) Get(ctx context.Context, name string, obj store.Object, opts ...
 
 // List implements store.Store.
 func (c Client) List(ctx context.Context, list store.ObjectList, opts ...store.ListOption) error {
-	resource, err := store.GetResource(list)
+	resource, err := c.schema.ResourceName(list)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -282,7 +282,7 @@ func (c Client) Update(ctx context.Context, obj store.Object, opts ...store.Upda
 
 // Watch implements store.Store.
 func (c Client) Watch(ctx context.Context, obj store.ObjectList, opts ...store.WatchOption) (store.Watcher, error) {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return nil, errors.NewBadRequest(err.Error())
 	}
@@ -389,7 +389,7 @@ func (c Client) Scope(scope ...store.Scope) store.Store {
 }
 
 func (s Client) update(ctx context.Context, obj store.Object, status bool, opts ...store.UpdateOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := s.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}
@@ -416,7 +416,7 @@ func (s Client) update(ctx context.Context, obj store.Object, status bool, opts 
 }
 
 func (c Client) patch(ctx context.Context, obj store.Object, status bool, patch store.Patch, opts ...store.PatchOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := c.schema.ResourceName(obj)
 	if err != nil {
 		return errors.NewBadRequest(err.Error())
 	}

@@ -57,14 +57,11 @@ func (i *InMemory) PatchBatch(ctx context.Context, obj store.ObjectList, patch s
 	if options.DryRun {
 		return errors.NewUnsupported("in-memory store does not support dry-run")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := i.resourceName(obj)
 	if err != nil {
 		return err
 	}
 	single := store.RawPatch(patch.Type(), patch.Data())
-	if _, err := store.DecodePatch(single, &store.Unstructured{}); err != nil {
-		return err
-	}
 	list := &store.List[store.Unstructured]{Resource: resource}
 	if err := i.List(
 		ctx,
@@ -92,7 +89,7 @@ func (i *InMemory) Count(ctx context.Context, obj store.Object, opts ...store.Co
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return 0, err
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := i.resourceName(obj)
 	if err != nil {
 		return 0, err
 	}
@@ -118,50 +115,28 @@ func (i *InMemory) Create(ctx context.Context, obj store.Object, opts ...store.C
 	if options.TTL != 0 {
 		return errors.NewUnsupported("in-memory store does not support TTL")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := i.resourceName(obj)
 	if err != nil {
 		return err
 	}
-	store.PrepareObjectForCreate(obj, resource, i.scopes)
-	return i.core.on(ctx, obj, func(ctx context.Context, resources string) error {
-		i.core.eventMu.Lock()
-		defer i.core.eventMu.Unlock()
-		if err := i.core.create(resources, i.scopes, obj.GetID(), obj); err != nil {
-			return err
-		}
-		i.core.notify(obj.GetResourceVersion(), nil, obj)
-		return nil
-	})
+	prepareObjectForCreate(obj, resource, i.scopes)
+	return i.core.create(resource, i.scopes, obj.GetID(), obj)
 }
 
-func (i *InMemory) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
+func (i *InMemory) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
 	options := store.ApplyDeleteOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || options.Preconditions != nil && (options.Preconditions.UID != nil || options.Preconditions.ResourceVersion != nil)
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.DryRun {
 		return errors.NewUnsupported("in-memory store does not support dry-run")
 	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	return i.core.on(ctx, obj, func(ctx context.Context, resources string) error {
-		i.core.eventMu.Lock()
-		defer i.core.eventMu.Unlock()
-		old := store.NewObject(obj)
-		if err := i.core.get(resources, i.scopes, obj.GetID(), old); err != nil {
-			return err
-		}
-		deleted, err := i.core.delete(resources, i.scopes, obj, options)
-		if err != nil {
-			return err
-		}
-		if deleted {
-			i.core.notify(int64(i.core.rev.Add(1)), old, nil)
-			return nil
-		}
-		i.core.notify(obj.GetResourceVersion(), old, obj)
-		return nil
-	})
+	resource, err := i.resourceName(obj)
+	if err != nil {
+		return err
+	}
+	_, err = i.core.delete(resource, i.scopes, obj, options)
+	return err
 }
 
 func (i *InMemory) DeleteBatch(ctx context.Context, obj store.ObjectList, opts ...store.DeleteBatchOption) error {
@@ -169,7 +144,7 @@ func (i *InMemory) DeleteBatch(ctx context.Context, obj store.ObjectList, opts .
 	if options.DryRun {
 		return errors.NewUnsupported("in-memory store does not support dry-run")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := i.resourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -202,24 +177,26 @@ func (i *InMemory) Get(ctx context.Context, name string, obj store.Object, opts 
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	return i.core.on(ctx, obj, func(ctx context.Context, resources string) error {
-		if err := i.core.get(resources, i.scopes, name, obj); err != nil {
-			return err
-		}
-		unstructured, err := store.ToUnstructured(obj)
-		if err != nil {
-			return err
-		}
-		if !store.MatchLabelReqirements(obj, options.LabelRequirements) ||
-			!store.MatchUnstructuredFieldRequirments(unstructured, options.FieldRequirements) {
-			return errors.NewNotFound(resources, name)
-		}
-		return store.ValidatePreconditions(obj, options.Preconditions)
-	})
+	resource, err := i.resourceName(obj)
+	if err != nil {
+		return err
+	}
+	if err := i.core.get(resource, i.scopes, name, obj); err != nil {
+		return err
+	}
+	unstructured, err := store.ToUnstructured(obj)
+	if err != nil {
+		return err
+	}
+	if !store.MatchLabelReqirements(obj, options.LabelRequirements) ||
+		!store.MatchUnstructuredFieldRequirments(unstructured, options.FieldRequirements) {
+		return errors.NewNotFound(resource, name)
+	}
+	return store.ValidatePreconditions(obj, options.Preconditions)
 }
 
 func (i *InMemory) List(ctx context.Context, list store.ObjectList, opts ...store.ListOption) error {
-	resource, err := store.GetResource(list)
+	resource, err := i.resourceName(list)
 	if err != nil {
 		return err
 	}
@@ -284,39 +261,24 @@ func (i *InMemory) List(ctx context.Context, list store.ObjectList, opts ...stor
 	return page.Finish(list)
 }
 
-func (i *InMemory) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
+func (i *InMemory) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
 	options := store.ApplyPatchOptions(opts)
-	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
 	if options.DryRun {
 		return errors.NewUnsupported("in-memory store does not support dry-run")
 	}
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	return i.core.on(ctx, obj, func(ctx context.Context, resource string) error {
-		i.core.eventMu.Lock()
-		defer i.core.eventMu.Unlock()
-		old := store.NewObject(obj)
-		if err := i.core.get(resource, i.scopes, obj.GetID(), old); err != nil {
-			return err
-		}
-		deleted, err := i.core.patch(resource, i.scopes, obj, patch, i.status, options)
-		if err != nil {
-			return err
-		}
-		if deleted {
-			i.core.notify(int64(i.core.rev.Add(1)), old, nil)
-			return nil
-		}
-		i.core.notify(obj.GetResourceVersion(), old, obj)
-		return nil
-	})
+	resource, err := i.resourceName(obj)
+	if err != nil {
+		return err
+	}
+	_, err = i.core.patch(resource, i.scopes, obj, patch, i.status, options)
+	return err
 }
 
-func (i *InMemory) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
+func (i *InMemory) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
 	options := store.ApplyUpdateOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.DryRun {
 		return errors.NewUnsupported("in-memory store does not support dry-run")
 	}
@@ -326,28 +288,16 @@ func (i *InMemory) Update(ctx context.Context, obj store.Object, opts ...store.U
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	return i.core.on(ctx, obj, func(ctx context.Context, resources string) error {
-		i.core.eventMu.Lock()
-		defer i.core.eventMu.Unlock()
-		old := store.NewObject(obj)
-		if err := i.core.get(resources, i.scopes, obj.GetID(), old); err != nil {
-			return err
-		}
-		deleted, err := i.core.put(resources, i.scopes, obj, i.status, options)
-		if err != nil {
-			return err
-		}
-		if deleted {
-			i.core.notify(int64(i.core.rev.Add(1)), old, nil)
-			return nil
-		}
-		i.core.notify(obj.GetResourceVersion(), old, obj)
-		return nil
-	})
+	resource, err := i.resourceName(obj)
+	if err != nil {
+		return err
+	}
+	_, err = i.core.put(resource, i.scopes, obj, i.status, options)
+	return err
 }
 
 func (i *InMemory) Watch(ctx context.Context, obj store.ObjectList, opts ...store.WatchOption) (store.Watcher, error) {
-	resource, err := store.GetResource(obj)
+	resource, err := i.resourceName(obj)
 	if err != nil {
 		return nil, err
 	}
@@ -380,10 +330,7 @@ func (i *InMemory) Watch(ctx context.Context, obj store.ObjectList, opts ...stor
 	i.core.addWatcher(watcher, options.SendInitialEvents)
 	go func() {
 		<-watcherCtx.Done()
-		i.core.watcherMu.Lock()
-		delete(i.core.watchers, watcher.id)
-		close(watcher.events)
-		i.core.watcherMu.Unlock()
+		i.core.removeWatcher(watcher)
 	}()
 	return watcher, nil
 }
@@ -404,15 +351,115 @@ func (i *InMemory) Status() store.StatusStorage {
 }
 
 type inmemory struct {
-	mu        sync.RWMutex
-	eventMu   sync.Mutex
-	rev       atomic.Uint64
-	kvs       map[string]kv
-	indexes   map[string]map[string]map[string]map[string]struct{}
-	schema    *store.Schema
-	watcherMu sync.RWMutex
-	watcherID atomic.Int64
-	watchers  map[int64]*inmemoryWatcher
+	mu         sync.RWMutex
+	rev        atomic.Uint64
+	kvs        map[string]kv
+	indexes    map[string]map[string]map[string]map[string]struct{}
+	schema     *store.Schema
+	watcherMu  sync.RWMutex
+	watcherID  atomic.Int64
+	watchers   map[int64]*inmemoryWatcher
+	dispatcher *eventDispatcher
+}
+
+type change struct {
+	revision int64
+	old      store.Object
+	new      store.Object
+}
+
+type eventQueue struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	items  []change
+	head   int
+	closed bool
+}
+
+func newEventQueue() *eventQueue {
+	queue := &eventQueue{}
+	queue.cond = sync.NewCond(&queue.mu)
+	return queue
+}
+
+func (q *eventQueue) push(item change) {
+	q.mu.Lock()
+	if !q.closed {
+		q.items = append(q.items, item)
+		q.cond.Signal()
+	}
+	q.mu.Unlock()
+}
+
+func (q *eventQueue) pop() (change, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.head >= len(q.items) && !q.closed {
+		q.cond.Wait()
+	}
+	if q.head >= len(q.items) {
+		return change{}, false
+	}
+	item := q.items[q.head]
+	q.head++
+	if q.head == len(q.items) {
+		q.items = q.items[:0]
+		q.head = 0
+	}
+	return item, true
+}
+
+func (q *eventQueue) stop() {
+	q.mu.Lock()
+	q.closed = true
+	q.items = nil
+	q.head = 0
+	q.cond.Broadcast()
+	q.mu.Unlock()
+}
+
+type eventDispatcher struct {
+	queue *eventQueue
+}
+
+func newEventDispatcher() *eventDispatcher {
+	return &eventDispatcher{queue: newEventQueue()}
+}
+
+func (d *eventDispatcher) run(core *inmemory) {
+	for {
+		item, ok := d.queue.pop()
+		if !ok {
+			return
+		}
+		core.notify(item)
+	}
+}
+
+func (d *eventDispatcher) stop() {
+	d.queue.stop()
+}
+
+func cloneObject(obj store.Object) store.Object {
+	if obj == nil {
+		return nil
+	}
+	clone := store.NewObject(obj)
+	if err := store.CopyObject(obj, clone); err != nil {
+		return nil
+	}
+	return clone
+}
+
+// enqueue must be called while the data write lock is held, so queue order
+// matches revision order.
+func (m *inmemory) enqueue(item change) {
+	m.watcherMu.RLock()
+	dispatcher := m.dispatcher
+	m.watcherMu.RUnlock()
+	if dispatcher != nil {
+		dispatcher.queue.push(item)
+	}
 }
 
 type kv struct {
@@ -468,13 +515,15 @@ func (m *inmemory) create(resource string, scopes []store.Scope, name string, va
 	if err := m.checkUnique(resource, key, indexValues); err != nil {
 		return err
 	}
+	revision := m.rev.Add(1)
 	m.kvs[key] = kv{
 		value: data,
-		rev:   m.rev.Add(1),
+		rev:   revision,
 	}
 	m.addIndexes(resource, key, indexValues)
 	if object, ok := value.(store.Object); ok {
-		object.SetResourceVersion(int64(m.kvs[key].rev))
+		object.SetResourceVersion(int64(revision))
+		m.enqueue(change{revision: int64(revision), new: cloneObject(object)})
 	}
 	return nil
 }
@@ -518,12 +567,12 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 	}
 	if !store.MatchLabelReqirements(current, options.LabelRequirements) ||
 		!store.MatchUnstructuredFieldRequirments(unstructured, options.FieldRequirements) {
-		return false, errors.NewNotFound(resource, desired.GetID())
+		return false, errors.NewConflict(resource, desired.GetID(), fmt.Errorf("write conditions did not match"))
 	}
 	if desired.GetResourceVersion() != 0 && desired.GetResourceVersion() != int64(kv.rev) {
 		return false, errors.NewConflict(resource, desired.GetID(), fmt.Errorf("resourceVersion %d does not match", desired.GetResourceVersion()))
 	}
-	deleted, err := m.schema.PrepareObjectForUpdate(current, desired, status)
+	deleted, err := prepareObjectForUpdate(current, desired, status)
 	if err != nil {
 		return false, err
 	}
@@ -534,6 +583,8 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 		}
 		m.removeIndexes(resource, key, oldIndexValues)
 		delete(m.kvs, key)
+		revision := m.rev.Add(1)
+		m.enqueue(change{revision: int64(revision), old: current, new: nil})
 		return true, nil
 	}
 	data, err := json.Marshal(desired)
@@ -552,11 +603,13 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 		return false, err
 	}
 	m.removeIndexes(resource, key, oldIndexValues)
-	kv.rev = m.rev.Add(1)
+	revision := m.rev.Add(1)
+	kv.rev = revision
 	kv.value = data
 	m.kvs[key] = kv
 	m.addIndexes(resource, key, indexValues)
-	desired.SetResourceVersion(int64(kv.rev))
+	desired.SetResourceVersion(int64(revision))
+	m.enqueue(change{revision: int64(revision), old: current, new: cloneObject(desired)})
 	return false, nil
 }
 
@@ -604,15 +657,30 @@ func (m *inmemory) addWatcher(watcher *inmemoryWatcher, sendInitialEvents bool) 
 		watcher.send(store.WatchEvent{Type: store.WatchEventBookmark})
 	}
 	watcher.startRevision = int64(m.rev.Load())
+	if m.dispatcher == nil {
+		m.dispatcher = newEventDispatcher()
+		go m.dispatcher.run(m)
+	}
 	m.watcherMu.Unlock()
 	m.mu.RUnlock()
 }
 
-func (m *inmemory) notify(revision int64, old, new store.Object) {
+func (m *inmemory) removeWatcher(watcher *inmemoryWatcher) {
+	m.watcherMu.Lock()
+	delete(m.watchers, watcher.id)
+	close(watcher.events)
+	if len(m.watchers) == 0 && m.dispatcher != nil {
+		m.dispatcher.stop()
+		m.dispatcher = nil
+	}
+	m.watcherMu.Unlock()
+}
+
+func (m *inmemory) notify(item change) {
 	m.watcherMu.RLock()
 	defer m.watcherMu.RUnlock()
 	for _, watcher := range m.watchers {
-		watcher.sendChange(revision, old, new)
+		watcher.sendChange(item.revision, item.old, item.new)
 	}
 }
 
@@ -706,6 +774,8 @@ func (w *inmemoryWatcher) send(event store.WatchEvent) {
 	select {
 	case w.events <- event:
 	case <-w.ctx.Done():
+	default:
+		w.Stop()
 	}
 }
 
@@ -746,7 +816,7 @@ func (m *inmemory) patch(
 	}
 	if !store.MatchLabelReqirements(current, options.LabelRequirements) ||
 		!store.MatchUnstructuredFieldRequirments(unstructured, options.FieldRequirements) {
-		return false, errors.NewNotFound(resource, into.GetID())
+		return false, errors.NewConflict(resource, into.GetID(), fmt.Errorf("write conditions did not match"))
 	}
 	if err := store.ValidatePreconditions(current, options.Preconditions); err != nil {
 		return false, err
@@ -755,10 +825,10 @@ func (m *inmemory) patch(
 	if err := store.CopyObject(current, desired); err != nil {
 		return false, err
 	}
-	if err := store.ApplyPatch(desired, into, patch); err != nil {
+	if err := ApplyPatch(desired, into, patch); err != nil {
 		return false, err
 	}
-	deleted, err := m.schema.PrepareObjectForUpdate(current, desired, status)
+	deleted, err := prepareObjectForUpdate(current, desired, status)
 	if err != nil {
 		return false, err
 	}
@@ -772,6 +842,8 @@ func (m *inmemory) patch(
 		if err := store.CopyObject(desired, into); err != nil {
 			return false, err
 		}
+		revision := m.rev.Add(1)
+		m.enqueue(change{revision: int64(revision), old: current, new: nil})
 		return true, nil
 	}
 	data, err := json.Marshal(desired)
@@ -790,14 +862,16 @@ func (m *inmemory) patch(
 		return false, err
 	}
 	m.removeIndexes(resource, key, oldIndexValues)
+	revision := m.rev.Add(1)
 	value.value = data
-	value.rev = m.rev.Add(1)
+	value.rev = revision
 	m.kvs[key] = value
 	m.addIndexes(resource, key, indexValues)
 	if err := store.CopyObject(desired, into); err != nil {
 		return false, errors.NewInternalError(err)
 	}
-	into.SetResourceVersion(int64(value.rev))
+	into.SetResourceVersion(int64(revision))
+	m.enqueue(change{revision: int64(revision), old: current, new: cloneObject(desired)})
 	return false, nil
 }
 
@@ -821,33 +895,38 @@ func (m *inmemory) delete(resource string, scopes []store.Scope, desired store.O
 	if err := store.ValidateDeleteRequirements(current, options.LabelRequirements, options.FieldRequirements); err != nil {
 		return false, err
 	}
+	old := cloneObject(current)
 	policy := store.DeletePropagationBackground
 	if options.PropagationPolicy != nil {
 		policy = *options.PropagationPolicy
 	}
-	if !store.PrepareObjectForDelete(current, policy) {
+	if !prepareObjectForDelete(current, policy) {
 		data, err := json.Marshal(current)
 		if err != nil {
 			return false, errors.NewInternalError(err)
 		}
+		revision := m.rev.Add(1)
 		kv.value = data
-		kv.rev = m.rev.Add(1)
+		kv.rev = revision
 		m.kvs[key] = kv
 		if err := store.CopyObject(current, desired); err != nil {
 			return false, errors.NewInternalError(err)
 		}
-		desired.SetResourceVersion(int64(kv.rev))
+		desired.SetResourceVersion(int64(revision))
+		m.enqueue(change{revision: int64(revision), old: old, new: cloneObject(desired)})
 		return false, nil
 	}
 	indexValues, err := m.indexValues(resource, scopes, kv.value)
 	if err != nil {
 		return false, err
 	}
+	revision := m.rev.Add(1)
 	m.removeIndexes(resource, key, indexValues)
 	delete(m.kvs, key)
 	if err := store.CopyObject(current, desired); err != nil {
 		return false, errors.NewInternalError(err)
 	}
+	m.enqueue(change{revision: int64(revision), old: old, new: nil})
 	return true, nil
 }
 
@@ -980,13 +1059,6 @@ func matchesSearch(object *store.Unstructured, search string, fields []string) b
 	return false
 }
 
-func (m *inmemory) on(ctx context.Context, into any, fn func(ctx context.Context, resources string) error) error {
-	if into == nil {
-		return errors.NewBadRequest("object is nil")
-	}
-	resources, err := store.GetResource(into)
-	if err != nil {
-		return err
-	}
-	return fn(ctx, resources)
+func (i *InMemory) resourceName(obj any) (string, error) {
+	return i.core.schema.ResourceName(obj)
 }

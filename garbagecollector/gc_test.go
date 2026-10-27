@@ -80,7 +80,7 @@ func newWatchGateStore() *watchGateStore {
 	for _, resource := range []string{"dependents", "owners"} {
 		object := &store.Unstructured{}
 		object.SetResource(resource)
-		if err := schema.Register(object, store.ResourceSchema{}); err != nil {
+		if err := schema.Register(object, store.ResourceSchema{ResourceName: resource}); err != nil {
 			panic(err)
 		}
 	}
@@ -105,7 +105,7 @@ func (s *watchGateStore) Watch(_ context.Context, list store.ObjectList, options
 	if !configured.SendInitialEvents {
 		return nil, stderrors.New("GC watch did not request initial events")
 	}
-	resource, err := store.GetResource(list)
+	resource, err := s.schema.ResourceName(list)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func TestNewChildrenGarbageCollector(t *testing.T) {
 	for _, resource := range []string{"zoos", "area", "employees", "cats", "dogs"} {
 		object := &store.Unstructured{}
 		object.SetResource(resource)
-		if err := schema.Register(object, store.ResourceSchema{}); err != nil {
+		if err := schema.Register(object, store.ResourceSchema{ResourceName: resource}); err != nil {
 			t.Fatalf("register %q: %v", resource, err)
 		}
 	}

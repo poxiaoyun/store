@@ -23,7 +23,7 @@
 SQL 支持受限的 Scope 路径：只有声明的 Scope 列能够与完整有序路径一一对应时，才能用
 这些列定位对象。路径的顺序、深度和每一级名称必须参与验证与匹配；重复资源类型、列名
 碰撞或其他无法无损表示的路径返回 Unsupported。完整 scopes 值保存于对象中，派生列
-不能覆盖或替代这份信息。根 Scope 精确匹配根对象，不能通过省略所有 Scope 条件查询全表。
+不能覆盖或替代这份信息。根 Scope 的普通查询精确匹配根对象。根上的 List、Count 显式提供 WithSubScopes 时查询整个资源集合，继续应用筛选、排序与分页合同；带 Scope 前缀的后代查询返回 Unsupported。
 
 每种资源始终以 id 为主键，在所有 Scope 中唯一；创建后 id 与 Scope 均不可修改。
 不同 Scope 创建相同 id 返回 AlreadyExists。ScopeKeys 用于 Scope 映射和查询索引，
@@ -33,6 +33,7 @@ SQL 支持受限的 Scope 路径：只有声明的 Scope 列能够与完整有�
 
 时间字段落为 `timestamptz` 或 `datetime(6)`；项目拥有的元数据时间类型在编解码层与
 `time.Time` 转换，不按普通结构体落 JSON。map、slice、struct 落为 `jsonb` 或 `json`。
+二进制 []byte 使用 bytea 或 blob，创建、读取、更新和 JSON Merge Patch 保持原字节；JSON 传输按 Go 的 base64 表示解码。
 字符串默认使用 text；被物理索引且需要有界键的字符串默认使用 varchar(255)，可通过
 ResourceSchema.FieldSpecs 的 Size 声明大小。
 
@@ -85,10 +86,8 @@ Limit 为零不限制数量；只请求 Offset 时，由方言表达跳过后返
 ResourceVersion 使用数据库表达式递增，包括等值赋值。带条件的写入未匹配时返回 Conflict，
 无附加条件的单对象写入未匹配时返回 NotFound，不为细分失败原因追加查询。
 
-Generation 只比较 ResourceSchema 声明的业务字段，没有声明时保持不变。比较基于同一次
-写入的旧值与新值，保持类型和数值精度；元数据与 status 不参与，等价赋值不推进。
-`Status().Update` 与 `Status().Patch` 只改变 status 与 ResourceVersion。SQL 只接受顶层标量
-Generation 跟踪字段；复杂结构或嵌套跟踪声明在绑定 Schema 时返回 Unsupported。
+Generation 比较同一次写入中业务列的旧值与新值，保持类型和数值精度；元数据与 status
+不参与，等价赋值不推进。`Status().Update` 与 `Status().Patch` 只改变 status 与 ResourceVersion。
 
 Delete 根据当前 finalizer 决定设置 DeletionTimestamp 或物理删除。终止期间不能新增
 finalizer 或改写删除时间；Update/Patch 清空最后一个 finalizer 时，物理删除是同一次
@@ -107,7 +106,7 @@ PatchBatch 的列赋值不能直接覆盖服务端元数据或 status，但 Stor
 
 `Transaction` 用 BeginTx 打开事务，回调收到绑定该事务的 Store；所有参与事务的操作
 都必须通过它执行。嵌套 Transaction 返回 Unsupported。默认隔离级别采用后端默认值，
-显式 WithIsolationLevel 无法执行时返回 Unsupported。
+显式 WithIsolationLevel 无法执行时返回 Unsupported。上下文取消导致驱动自动回滚时，返回相应的 Context 错误；业务回调失败保留原错误。
 
 死锁与序列化失败按 WithMaxRetries 重试，默认 3 次，退避上限 100ms；重新执行回调前
 必须结束并回滚失败事务。回调须允许重复执行，不能假设事务内的外部副作用会随数据库回滚。

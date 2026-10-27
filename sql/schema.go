@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"slices"
 
-	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
 
@@ -39,17 +38,6 @@ func (s *Storage) planTable(resource string, definition store.ResourceSchema) (t
 	fields, err := s.core.codec.ModelFields(definition.Object)
 	if err != nil {
 		return tablePlan{}, err
-	}
-	for _, name := range definition.GenerationFields {
-		supported := false
-		for _, field := range fields {
-			if field.Name == name && !documentType(field.Type) {
-				supported = true
-			}
-		}
-		if !supported {
-			return tablePlan{}, errors.NewUnsupported("SQL Generation tracking requires top-level scalar fields")
-		}
 	}
 	columns := make([]ColumnSpec, 0, len(fields))
 	known := make(map[string]struct{}, len(fields))

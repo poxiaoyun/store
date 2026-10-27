@@ -28,6 +28,10 @@ ID 创建后不可修改。SQL 要求同一种资源的 ID 在所有 Scope 中�
 同一 ID 也返回 AlreadyExists；其他 backend 可以允许跨 Scope 复用 ID。唯一范围不改变
 Scope 隔离。SQL 已有表须具有 `PRIMARY KEY(id)`，不满足时构造失败，需要显式迁移。
 
+资源名在 `ResourceSchema.ResourceName` 中声明；为空时按对象类型名推导默认复数名称。
+`Unstructured` 和 `ObjectList` 使用自身的 `resource` 字段。Store 实现通过 Schema 解析
+资源名，不再依赖对象上的 `ResourceName()` 方法。
+
 ## 更新与并发
 
 普通的读取—修改—写入流程必须保留读取到的 `ResourceVersion`。调用 `Get` 后修改对象再执行 `Update`，或者 `CreateOrUpdate` 返回已有对象时，不要把 `ResourceVersion` 重置为零。
@@ -41,15 +45,27 @@ Scope 隔离。SQL 已有表须具有 `PRIMARY KEY(id)`，不满足时构造失�
 
 Update、Patch、Status 写入和 Delete 不保证刷新输入对象。需要最新字段或版本时，
 显式 Get；这是独立的读取快照。Create 返回生成的身份与初始元数据。
-携带版本、UID 或 selector 的写入未匹配时返回 Conflict，包括目标不存在；
-没有附加条件的单对象写入找不到目标时返回 NotFound。
+单对象写入目标不存在时返回 NotFound；对象存在但版本、UID 或 selector 条件不匹配时返回 Conflict。
 
-Generation 只跟踪 `ResourceSchema.GenerationFields` 声明的业务字段；未声明时保持初始值。
-SQL 只支持顶层标量字段跟踪，无法执行的声明在构造时拒绝。
+Generation 的递增规则由各 backend 自行定义；对象元数据和 status 的变化不推进 Generation。
 SQL 的 Merge Patch 支持标量、整数组替换、一层 JSON 对象合并与键删除；
 嵌套对象合并及 JSON Patch 返回 Unsupported，不自动转为整对象读改写。
 
 只修改少数字段时优先使用原子 `Patch`，精确身份及版本条件通过 `WithPreconditions` 提交。只有操作具有完整替换语义，或者新值依赖刚读取的完整对象版本时才使用 `Update`；后一种情况应保留版本，使并发变化返回 Conflict，而不是覆盖其他写入。
+
+余额、计数等相对更新使用字段 patch，避免先读后写：
+
+```go
+err := storage.Patch(ctx, account, store.FieldPatch{Operations: []store.FieldOperation{
+  {Op: store.FieldOpInc, Path: "balance", Value: int64(-30)},
+}}, store.WithFieldRequirements(
+  selector.NewRequirement("balance", selector.GreaterThanOrEqual, int64(30)),
+))
+```
+
+`FieldPatch` 的操作按数组顺序应用；`Path` 是点分隔的 JSON 字段路径（如
+`balance`、`nested.count`）。是否支持某个路径由具体 backend 决定，不支持时
+应拒绝整个 patch 而不是产生部分效果。
 
 ## 查询与错误
 
@@ -170,3 +186,7 @@ MongoDB 消费需要 replica set 或 sharded cluster 提供 change stream。通�
 轮询负责延迟消息和补漏；积压消息连续领取，不在每条消息间等待。连接的超时配置也适用于
 退出时的确认或释放操作。进程崩溃或数据库确认失败可能留下处理中消息，Queue 不自动回收；
 需要执行租约和自动重试时使用 task。
+
+## MongoDB 事务与编码
+
+`mongo.NewMongoStorage` 默认使用 MongoDB 的 BSON 编码；`mongo.WithBSONRegistry` 可为单个实例提供值类型编码器。调用方通过 `Close(ctx)` 释放连接。事务使用 snapshot 读取与 majority 提交，支持默认、ReadCommitted 和 RepeatableRead 请求；Serializable 返回 Unsupported。数据库瞬态事务冲突及未知提交结果由 MongoDB 驱动的 WithTransaction 协议处理。

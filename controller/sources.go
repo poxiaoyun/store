@@ -21,7 +21,7 @@ func (f SourceFunc[K]) Run(ctx context.Context, queue TypedQueue[K]) error {
 }
 
 func NewStoreSource(storage store.Store, example store.Object, predicate ...Predicate[store.Object]) StoreSource[ScopedKey] {
-	resource, err := store.GetResource(example)
+	resource, err := storage.Schema().ResourceName(example)
 	if err != nil {
 		panic(err)
 	}

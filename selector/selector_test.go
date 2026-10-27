@@ -1,6 +1,7 @@
 package selector_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -67,5 +68,22 @@ func TestRequirementValidate(t *testing.T) {
 				t.Fatal("Validate() error = nil")
 			}
 		})
+	}
+}
+
+func TestRequirementsFromMapStableOrder(t *testing.T) {
+	fields := map[string]string{}
+	for index := 15; index >= 0; index-- {
+		fields[fmt.Sprintf("field%02d", index)] = fmt.Sprintf("value%d", index)
+	}
+	requirements := selector.RequirementsFromMap(fields)
+	if len(requirements) != len(fields) {
+		t.Fatalf("lost filters: %v", requirements)
+	}
+	for index, requirement := range requirements {
+		key := fmt.Sprintf("field%02d", index)
+		if requirement.Key != key || requirement.Operator != selector.Equals || len(requirement.Values) != 1 || requirement.Values[0] != fields[key] {
+			t.Fatalf("condition %d: %+v", index, requirement)
+		}
 	}
 }

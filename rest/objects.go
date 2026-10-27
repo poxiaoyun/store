@@ -49,7 +49,7 @@ func listObjects[T store.ObjectList](r *http.Request, storage store.Store, list 
 }
 
 func watchObjects[T store.ObjectList](w http.ResponseWriter, r *http.Request, storage store.Store, list T, listOptions store.ListOptions) error {
-	resource, err := store.GetResource(list)
+	resource, err := storage.Schema().ResourceName(list)
 	if err != nil {
 		return err
 	}

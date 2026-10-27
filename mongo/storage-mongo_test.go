@@ -34,8 +34,21 @@ type TestObjectStatus struct {
 	Slice []string `json:"slice"`
 }
 
-func (*TestObject) ResourceName() string {
-	return "testobjects"
+type fieldPatchObject struct {
+	store.ObjectMeta `json:",inline"`
+	Balance          int64             `json:"balance"`
+	Note             string            `json:"note,omitempty"`
+	Nested           *fieldPatchNested `json:"nested,omitempty"`
+	Status           fieldPatchStatus  `json:"status"`
+}
+
+type fieldPatchNested struct {
+	Count int    `json:"count"`
+	Keep  string `json:"keep"`
+}
+
+type fieldPatchStatus struct {
+	Phase string `json:"phase,omitempty"`
 }
 
 func TestMongoStorageDottedScopeRoundTrip(t *testing.T) {
@@ -110,7 +123,7 @@ type scopedCodecObject struct {
 func TestMongoStorageScopedObjectCodecs(t *testing.T) {
 	uri := testmongodb.RequireURI(t)
 	database := RequireIntegrationDatabase(t, uri)
-	root := NewIntegrationStorage(t, database, &scopedCodecObject{})
+	root := NewStatusIntegrationStorage(t, database, &scopedCodecObject{})
 	scopes := []store.Scope{{Resource: "iam.organization", Name: "one"}}
 	storage := root.Scope(scopes...)
 	object := &scopedCodecObject{
@@ -415,6 +428,7 @@ func TestStoreConformance(t *testing.T) {
 	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 	storetest.Run(t, storetest.Fixture{
 		Capabilities:     capabilities,
+		JSONPatchSetOnly: true,
 		Continue:         true,
 		LabelSelector:    true,
 		FieldSelector:    true,
@@ -505,6 +519,20 @@ func NewIntegrationStorage(t testing.TB, database *mongo.Database, objects ...st
 			t.Fatalf("register schema: %v", err)
 		}
 	}
+	return newIntegrationStorage(t, database, schema)
+}
+
+func NewStatusIntegrationStorage(t testing.TB, database *mongo.Database, object store.Object) *MongoStorage {
+	t.Helper()
+	schema := store.NewSchema()
+	if err := schema.Register(object, store.ResourceSchema{StatusResource: true}); err != nil {
+		t.Fatalf("register schema: %v", err)
+	}
+	return newIntegrationStorage(t, database, schema)
+}
+
+func newIntegrationStorage(t testing.TB, database *mongo.Database, schema *store.Schema) *MongoStorage {
+	t.Helper()
 	core := &MongoStorageCore{
 		schema:       schema,
 		db:           database,

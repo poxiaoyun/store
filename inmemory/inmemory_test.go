@@ -43,8 +43,6 @@ type user struct {
 	Team             string `json:"team,omitempty"`
 }
 
-func (*user) ResourceName() string { return "users" }
-
 func newUserStore(t *testing.T) *InMemory {
 	t.Helper()
 	schema := store.NewSchema()

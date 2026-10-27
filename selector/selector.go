@@ -3,8 +3,10 @@ package selector
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
+	"slices"
 	"time"
 
 	"xiaoshiai.cn/common/meta"
@@ -167,11 +169,11 @@ func (r Requirements) Validate() error {
 	return nil
 }
 
-// RequirementsFromMap constructs an equality requirement for every map entry.
+// RequirementsFromMap returns equality requirements in ascending field-name order.
 func RequirementsFromMap(kvs map[string]string) Requirements {
 	var reqs Requirements
-	for k, v := range kvs {
-		reqs = append(reqs, RequirementEqual(k, v))
+	for _, key := range slices.Sorted(maps.Keys(kvs)) {
+		reqs = append(reqs, RequirementEqual(key, kvs[key]))
 	}
 	return reqs
 }

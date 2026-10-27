@@ -15,10 +15,23 @@ import (
 
 type objectAdapterStore struct {
 	store.Store
+	schema       *store.Schema
 	listOptions  store.ListOptions
 	watchOptions store.WatchOptions
 	updated      store.Object
 	watcher      store.Watcher
+}
+
+func (s *objectAdapterStore) Schema() *store.Schema {
+	return s.schema
+}
+
+func newObjectAdapterStore() *objectAdapterStore {
+	schema := store.NewSchema()
+	if err := schema.Register(&objectAdapterFixture{}, store.ResourceSchema{ResourceName: "object-adapter-fixtures"}); err != nil {
+		panic(err)
+	}
+	return &objectAdapterStore{schema: schema}
 }
 
 func (s *objectAdapterStore) List(_ context.Context, _ store.ObjectList, options ...store.ListOption) error {
@@ -50,10 +63,8 @@ type objectAdapterFixture struct {
 	store.ObjectMeta `json:",inline"`
 }
 
-func (*objectAdapterFixture) ResourceName() string { return "object-adapter-fixtures" }
-
 func TestListObjectsAppliesCallerOptionsAfterRequestOptions(t *testing.T) {
-	storage := &objectAdapterStore{}
+	storage := newObjectAdapterStore()
 	request := httptest.NewRequest(http.MethodGet, "/?page=2&size=25&labelSelector=environment%3Dproduction", nil)
 	list := &store.List[objectAdapterFixture]{}
 	serverRequirement := selector.RequirementEqual("tenant", "tenant-1")
@@ -81,7 +92,8 @@ func TestListObjectsOrWatchPassesRequestFiltersToWatch(t *testing.T) {
 	watchError := stderrors.New("watch stopped")
 	events := make(chan store.WatchEvent, 1)
 	events <- store.WatchEvent{Error: watchError}
-	storage := &objectAdapterStore{watcher: &objectAdapterWatcher{events: events}}
+	storage := newObjectAdapterStore()
+	storage.watcher = &objectAdapterWatcher{events: events}
 	request := httptest.NewRequest(http.MethodGet, "/?watch=true&sendInitialEvents=true&labelSelector=environment%3Dproduction&fieldSelector=enabled%3Dtrue", nil)
 
 	_, err := ListObjectsOrWatch(
@@ -107,7 +119,7 @@ func TestListObjectsOrWatchPassesRequestFiltersToWatch(t *testing.T) {
 }
 
 func TestUpdateObjectPreservesResourceVersion(t *testing.T) {
-	storage := &objectAdapterStore{}
+	storage := newObjectAdapterStore()
 	request := httptest.NewRequest(http.MethodPut, "/objects/object-1", strings.NewReader(`{"id":"object-1","resourceVersion":7}`))
 	request.Header.Set("Content-Type", "application/json")
 

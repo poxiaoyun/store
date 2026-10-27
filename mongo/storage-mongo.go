@@ -131,13 +131,28 @@ func (BsonQuantityCodec) EncodeValue(ctx bsoncodec.EncodeContext, vw bsonrw.Valu
 	return nil
 }
 
-func NewMongoStorage(ctx context.Context, schema *store.Schema, options *MongoDBOptions) (*MongoStorage, error) {
+// MongoStorageOptions configures instance-specific BSON encoding.
+type MongoStorageOptions struct{ BSONRegistry *bsoncodec.Registry }
+
+// MongoStorageOption applies a construction-time option.
+type MongoStorageOption func(*MongoStorageOptions)
+
+// WithBSONRegistry selects the registry used by both stored values and query operands.
+func WithBSONRegistry(registry *bsoncodec.Registry) MongoStorageOption {
+	return func(options *MongoStorageOptions) { options.BSONRegistry = registry }
+}
+
+func NewMongoStorage(ctx context.Context, schema *store.Schema, options *MongoDBOptions, opts ...MongoStorageOption) (*MongoStorage, error) {
 	schema, err := schema.Clone()
 	if err != nil {
 		return nil, err
 	}
 	mongoBsonOptions := &mongooptions.BSONOptions{UseJSONStructTags: true, OmitZeroStruct: true}
-	mongoBsonRegistry := GlobalBsonRegistry
+	settings := MongoStorageOptions{BSONRegistry: GlobalBsonRegistry}
+	for _, option := range opts {
+		option(&settings)
+	}
+	mongoBsonRegistry := settings.BSONRegistry
 
 	db, err := NewMongoDB(ctx, mongoBsonOptions, mongoBsonRegistry, options)
 	if err != nil {
@@ -154,6 +169,8 @@ func NewMongoStorage(ctx context.Context, schema *store.Schema, options *MongoDB
 			WithName("mongo-storage"),
 	}
 	if err := core.initCollections(ctx); err != nil {
+		_ = db.Client().
+			Disconnect(ctx)
 		return nil, err
 	}
 	storage := &MongoStorage{core: core}
@@ -255,6 +272,12 @@ func (m *MongoStorage) Capabilities() store.Capabilities {
 	return store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 }
 
+// Close releases the client owned by this storage instance.
+func (m *MongoStorage) Close(ctx context.Context) error {
+	return m.core.db.Client().
+		Disconnect(ctx)
+}
+
 func (m *MongoStorage) Ping(ctx context.Context) error {
 	return m.core.db.Client().
 		Ping(ctx, nil)
@@ -315,7 +338,7 @@ func (m *MongoStorage) Create(ctx context.Context, into store.Object, opts ...st
 		return errors.NewUnsupported("MongoDB store does not support TTL")
 	}
 	return m.on(ctx, into, false, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
-		store.PrepareObjectForCreate(into, col.Name(), slices.Clone(m.scopes))
+		prepareObjectForCreate(into, col.Name(), slices.Clone(m.scopes))
 		into.SetResourceVersion(1)
 		data, err := m.objectDocument(into)
 		if err != nil {
@@ -389,14 +412,12 @@ loop:
 }
 
 // Delete implements Storage.
-func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
+func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
 	id := obj.GetID()
 	if id == "" {
 		return errors.NewBadRequest("id is required")
 	}
 	options := store.ApplyDeleteOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || options.Preconditions != nil && (options.Preconditions.UID != nil || options.Preconditions.ResourceVersion != nil)
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.DryRun {
 		return errors.NewUnsupported("MongoDB store does not support dry-run")
 	}
@@ -424,7 +445,7 @@ func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...sto
 				policy = *options.PropagationPolicy
 			}
 			versionFilter := append(slices.Clone(filter), bson.E{Key: "resourceVersion", Value: current.GetResourceVersion()}, bson.E{Key: "uid", Value: current.GetUID()})
-			if store.PrepareObjectForDelete(current, policy) {
+			if prepareObjectForDelete(current, policy) {
 				result, err := col.DeleteOne(ctx, versionFilter)
 				if err != nil {
 					return WarpMongoError(err, col, obj)
@@ -511,10 +532,8 @@ func (m *MongoStorage) Get(ctx context.Context, id string, obj store.Object, opt
 }
 
 // Update implements Storage.
-func (m *MongoStorage) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
+func (m *MongoStorage) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
 	options := store.ApplyUpdateOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.DryRun {
 		return errors.NewUnsupported("MongoDB store does not support dry-run")
 	}
@@ -535,16 +554,36 @@ func (m *MongoStorage) Patch(ctx context.Context, obj store.Object, patch store.
 // The patch carries no precondition on the version the caller observed: only its
 // own resourceVersion, its tests and the caller's preconditions decide whether it
 // applies, so concurrent writers do not conflict.
-func (m *MongoStorage) patch(ctx context.Context, obj store.Object, patch store.Patch, status bool, options store.PatchOptions) (result error) {
-	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
+func (m *MongoStorage) patch(ctx context.Context, obj store.Object, patch store.Patch, status bool, options store.PatchOptions) error {
 	if options.DryRun {
 		return errors.NewUnsupported("MongoDB store does not support dry-run")
 	}
-	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, status, 0, options.Preconditions, func(current, desired store.Object) error {
+	switch patch.Type() {
+	case store.PatchTypeFieldPatch:
+		return m.fieldPatch(ctx, obj, patch, status, options)
+	case store.PatchTypeJSONPatch:
+		return m.jsonPatch(ctx, obj, patch, status, options)
+	case store.PatchTypeMergePatch:
+		return m.mergePatch(ctx, obj, patch, status, options)
+	default:
+		return errors.NewUnsupported(fmt.Sprintf("patch type %s is not supported", patch.Type()))
+	}
+}
+
+func (m *MongoStorage) mergePatch(ctx context.Context, obj store.Object, patch store.Patch, status bool, options store.PatchOptions) error {
+	data, err := patch.Data(obj)
+	if err != nil {
+		return err
+	}
+	fields, version, err := decodeMergePatch(data)
+	if err != nil {
+		return err
+	}
+	return m.replace(ctx, obj, options.LabelRequirements, options.FieldRequirements, status, version, options.Preconditions, func(current, desired store.Object) error {
 		if err := store.CopyObject(current, desired); err != nil {
 			return err
 		}
-		return store.ApplyPatch(desired, obj, patch)
+		return applyMergePatchFields(desired, fields)
 	})
 }
 
@@ -554,14 +593,43 @@ func (m *MongoStorage) PatchBatch(ctx context.Context, list store.ObjectList, pa
 	if options.DryRun {
 		return errors.NewUnsupported("store does not support dry-run")
 	}
-	_, newItem, err := store.NewItemFuncFromList(list)
-	if err != nil {
+	if _, _, err := store.NewItemFuncFromList(list); err != nil {
 		return err
 	}
-	single := store.RawPatch(patch.Type(), patch.Data())
-	if _, err := store.DecodePatch(single, newItem()); err != nil {
-		return err
+	data := patch.Data()
+	switch patch.Type() {
+	case store.PatchTypeJSONPatch:
+		fields, tests, err := decodeJSONPatch(data)
+		if err != nil {
+			return err
+		}
+		operations, err := jsonPatchOperations(fields, tests)
+		if err != nil {
+			return err
+		}
+		resource, err := m.core.schema.ResourceName(list)
+		if err != nil {
+			return err
+		}
+		definition, err := m.core.schema.Resource(resource)
+		if err != nil {
+			return err
+		}
+		if err := m.validateFieldPatch(definition, operations, false); err != nil {
+			return errors.NewUnsupported(err.Error())
+		}
+	case store.PatchTypeFieldPatch:
+		if _, err := decodeFieldPatch(data); err != nil {
+			return err
+		}
+	case store.PatchTypeMergePatch:
+		if _, _, err := decodeMergePatch(data); err != nil {
+			return err
+		}
+	default:
+		return errors.NewUnsupported(fmt.Sprintf("patch type %s is not supported", patch.Type()))
 	}
+	single := store.RawPatch(patch.Type(), data)
 	if err := m.List(ctx, list, store.WithLabelRequirements(options.LabelRequirements...), store.WithFieldRequirements(options.FieldRequirements...)); err != nil {
 		return err
 	}
@@ -584,7 +652,7 @@ func (m *MongoStorage) List(ctx context.Context, list store.ObjectList, opts ...
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	resource, err := store.GetResource(list)
+	resource, err := m.core.schema.ResourceName(list)
 	if err != nil {
 		return err
 	}
@@ -920,6 +988,12 @@ func WarpMongoError(err error, col *mongo.Collection, obj store.Object) error {
 }
 
 func ConvetMongoListError(err error, col *mongo.Collection) error {
+	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if labeled, ok := err.(interface{ HasErrorLabel(string) bool }); ok && labeled.HasErrorLabel("TransientTransactionError") {
+		return err
+	}
 	mongoerr, ok := err.(mongo.CommandError)
 	if ok {
 		switch mongoerr.Code {
@@ -931,6 +1005,13 @@ func ConvetMongoListError(err error, col *mongo.Collection) error {
 }
 
 func ConvetMongoError(err error, col *mongo.Collection, name string) error {
+	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	// WithTransaction must receive driver labels to retry the complete callback.
+	if labeled, ok := err.(interface{ HasErrorLabel(string) bool }); ok && labeled.HasErrorLabel("TransientTransactionError") {
+		return err
+	}
 	if stderrors.Is(err, mongo.ErrNoDocuments) {
 		return errors.NewNotFound(col.Name(), name)
 	}
@@ -951,14 +1032,18 @@ type MongoStorageStatus struct {
 
 // Patch implements StatusStorage.
 func (m *MongoStorageStatus) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
+	if err := m.requireStatusResource(obj); err != nil {
+		return err
+	}
 	return m.patch(ctx, obj, patch, true, store.ApplyPatchOptions(opts))
 }
 
 // Update implements StatusStorage.
-func (m *MongoStorageStatus) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
+func (m *MongoStorageStatus) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+	if err := m.requireStatusResource(obj); err != nil {
+		return err
+	}
 	options := store.ApplyUpdateOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.DryRun {
 		return errors.NewUnsupported("MongoDB store does not support dry-run")
 	}
@@ -1013,7 +1098,7 @@ func (m *MongoStorage) replace(
 			if err := change(current, desired); err != nil {
 				return err
 			}
-			completeDeletion, err := m.core.schema.PrepareObjectForUpdate(current, desired, status)
+			completeDeletion, err := prepareObjectForUpdate(current, desired, status)
 			if err != nil {
 				return err
 			}
@@ -1090,7 +1175,7 @@ func (m *MongoStorage) on(ctx context.Context, into any, includeSubScopes bool, 
 }
 
 func (m *MongoStorage) getCollectionName(into any) (string, error) {
-	return store.GetResource(into)
+	return m.core.schema.ResourceName(into)
 }
 
 func listToBsonD(list []string) bson.D {

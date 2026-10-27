@@ -64,8 +64,9 @@ AlreadyExists。更严格的 ID 唯一性不改变 Scope 隔离，所有读写�
 DeletionTimestamp 由 Store 决定，调用方预填值不能覆盖服务端值。身份或唯一约束冲突
 返回 AlreadyExists。
 
-资源名默认由对象类型名按统一复数规则推导。只有既有持久化或外部协议名称构成明确约束时，
-对象才通过 `ResourceName() string` 指定不同名称。
+资源名来自已注册的 `ResourceSchema.ResourceName`；为空时由对象类型名按统一复数规则推导
+默认名称，未注册的类型也使用默认名称。`Unstructured` 和 `ObjectList` 使用自身的 resource
+字段。
 
 Scope 是可变深度的有序路径，资源类型是字面值，可以含点号，也可以在不同位置重复；
 顺序和每一级名称均参与身份判定。普通 Get、List、Count 和写操作精确匹配完整当前
@@ -83,11 +84,9 @@ ResourceVersion 是并发控制版本，成功创建后为正数。持久化内�
 调用方不能把版本变化当作业务内容变化的证明，也不能假设每次成功调用都会改变版本。
 无变化优化必须在前置条件验证之后，不能把过期条件请求变成成功。
 
-Generation 从 1 开始，只跟踪 ResourceSchema 明确声明的业务字段；没有声明时不跟踪变化。
-一次写入中任一被跟踪字段实际改变，Generation 加一。公共元数据与顶层 status 不得列为
-跟踪字段，未被声明的业务字段变化也不推进 Generation。生命周期合并与字段比较必须保留
-JSON 数值完整精度；等价数值表示不构成变化，字符串与数值不相互转换。backend 无法准确执行
-声明的跟踪字段时，在绑定 Schema 时拒绝，不能静默忽略或退化为每次写入递增。
+Generation 从 1 开始，递增规则由各 backend 自行定义。公共元数据与顶层 status 的变化不推进
+Generation；业务字段实际改变时加一。生命周期合并与字段比较必须保留 JSON 数值完整精度；
+等价数值表示不构成变化，字符串与数值不相互转换。
 
 Status 是否存在由资源类型决定，对没有 status 的资源执行 Status 写入返回 Unsupported。
 Create 可以初始化 status；普通 Update、Patch 和 PatchBatch 保留存储中的 status。
@@ -112,8 +111,8 @@ Update 对象的 ResourceVersion 为零表示无版本条件，非零表示条�
 UID 条件、selector 和其他已支持条件也不能静默丢弃。
 
 Get 在同一对象快照上判断 selector 与精确前置条件：对象不存在或 selector 不匹配返回
-NotFound，已选中对象的前置条件不匹配返回 Conflict。单对象写入没有附加条件时，目标不存在
-返回 NotFound；携带版本、UID 或 selector 条件时，目标不存在或条件不匹配统一返回 Conflict。
+NotFound，已选中对象的前置条件不匹配返回 Conflict。单对象写入目标不存在返回 NotFound；
+对象存在但版本、UID 或 selector 条件不匹配返回 Conflict。
 JSON Patch test 失败仍属于补丁校验错误。条件之间按 AND 组合，字段投影不能绕过条件。
 
 Create 通过输入对象返回生成的身份和初始元数据。Update、Patch、Status 写入及 Delete 只
@@ -122,6 +121,12 @@ Create 通过输入对象返回生成的身份和初始元数据。Update、Patc
 
 Patch 的类型和字段范围由 backend 明确限定；支持的请求须完整遵守对应补丁语义。无法准确
 执行时返回 Unsupported，不近似合并，也不以隐藏的逐对象读取模拟未声明的能力。
+
+字段 patch 的 operations 按数组顺序应用，因此后一个操作可以看到前一个操作的结果。
+Path 是点分隔的 JSON 字段路径，与 ResourceSchema 中的 field path 使用同一语法。字段
+是否可写由 backend 决定；不支持的路径必须拒绝整个 patch，不能产生部分效果。字段操作、
+前置条件、ResourceVersion 推进和 Generation 变更必须在同一次后端写入中完成，不能先读
+当前值再无条件写回。`inc` 是相对操作，不要求调用方读取当前值。
 
 单对象条件判断、补丁应用、元数据维护和生命周期结果必须原子完成。条件失败不能改变对象、
 推进版本或产生 Watch 事件。实现可以采用原子语句、事务或内部 CAS；调用方固定的前置条件

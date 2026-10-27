@@ -86,8 +86,6 @@ type MyObject struct {
 	Status           MyObjectStatus `json:"status"`
 }
 
-func (*MyObject) ResourceName() string { return "myobjects" }
-
 type MyObjectSpec struct {
 	Value string `json:"value"`
 }
@@ -391,8 +389,7 @@ func TestEtcdCacherStore(t *testing.T) {
 	t.Run("schema rejects unsupported unique indexes", func(t *testing.T) {
 		schema := store.NewSchema()
 		if err := schema.Register(&MyObject{}, store.ResourceSchema{
-			GenerationFields: []string{"spec", "enabled"},
-			Indexes:          []store.Index{{Name: "unique-name", Fields: []string{"name"}, Unique: true}},
+			Indexes: []store.Index{{Name: "unique-name", Fields: []string{"name"}, Unique: true}},
 		}); err != nil {
 			t.Fatalf("Register() error = %v", err)
 		}
@@ -412,7 +409,6 @@ func newMyObjectSchema(t *testing.T) *store.Schema {
 	t.Helper()
 	schema := store.NewSchema()
 	if err := schema.Register(&MyObject{}, store.ResourceSchema{
-		GenerationFields: []string{"spec", "enabled"},
 		Indexes: []store.Index{
 			{Name: "enabled", Fields: []string{"enabled"}},
 			{Name: "organization", Fields: []string{"organization"}},

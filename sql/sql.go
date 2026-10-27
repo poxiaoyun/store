@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -120,6 +121,11 @@ func (s *Storage) Transaction(ctx context.Context, fn func(ctx context.Context, 
 	}
 	for attempt := 0; ; attempt++ {
 		if err := s.runTransaction(ctx, txOptions, fn); err != nil {
+			// database/sql may complete its cancellation rollback before Commit
+			// observes the canceled context. Preserve the cancellation cause.
+			if stderrors.Is(err, sql.ErrTxDone) && ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if !s.core.dialect.IsRetryableConflict(err) || attempt >= retries {
 				return err
 			}
@@ -211,11 +217,11 @@ func (s *Storage) Create(ctx context.Context, in store.Object, options ...store.
 	if opts.DryRun {
 		return errors.NewUnsupported("SQL store does not support dry-run")
 	}
-	resource, err := store.GetResource(in)
+	resource, err := s.core.schema.ResourceName(in)
 	if err != nil {
 		return err
 	}
-	store.PrepareObjectForCreate(in, resource, s.scopes)
+	prepareObjectForCreate(in, resource, s.scopes)
 	in.SetResourceVersion(1)
 	values := s.core.codec.ToDriverValueMap(in)
 	for _, scope := range s.scopes {
@@ -243,7 +249,7 @@ func (s *Storage) Get(ctx context.Context, id string, into store.Object, options
 }
 
 func (s *Storage) get(ctx context.Context, into store.Object, id string, opts store.GetOptions) error {
-	resource, err := store.GetResource(into)
+	resource, err := s.core.schema.ResourceName(into)
 	if err != nil {
 		return err
 	}
@@ -327,7 +333,7 @@ func (s *Storage) update(ctx context.Context, obj store.Object, status bool, opt
 	if opts.TTL != 0 {
 		return errors.NewUnsupported("SQL store does not support TTL")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := s.core.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -368,11 +374,26 @@ func (s *Storage) writeWhere(q *QueryState, id string, labels, fields store.Requ
 	return where, nil
 }
 
-func writeMiss(resource, id string, labels, fields store.Requirements, preconditions *store.Preconditions) error {
-	if len(labels)+len(fields) > 0 || preconditions != nil && (preconditions.UID != nil || preconditions.ResourceVersion != nil) {
+func (s *Storage) writeMiss(ctx context.Context, resource, id string, labels, fields store.Requirements, preconditions *store.Preconditions) error {
+	conditional := len(labels)+len(fields) > 0 || preconditions != nil && (preconditions.UID != nil || preconditions.ResourceVersion != nil)
+	if !conditional {
+		return errors.NewNotFound(resource, id)
+	}
+	q := &QueryState{dialect: s.core.dialect}
+	where, err := s.whereClause(q, id, nil, nil)
+	if err != nil {
+		return err
+	}
+	statement := "SELECT 1 FROM " + s.core.dialect.Quote(resource) + where
+	var exists int
+	err = s.core.exec.QueryRowContext(ctx, statement, q.args...).Scan(&exists)
+	if err == nil {
 		return errors.NewConflict(resource, id, fmt.Errorf("write conditions did not match"))
 	}
-	return errors.NewNotFound(resource, id)
+	if stderrors.Is(err, sql.ErrNoRows) {
+		return errors.NewNotFound(resource, id)
+	}
+	return s.core.dialect.MapError(err, resource, id)
 }
 
 // atomicMutation uses the caller's transaction, or opens one without retrying
@@ -385,7 +406,7 @@ func (s *Storage) atomicMutation(ctx context.Context, fn func(*Storage) error) e
 }
 
 func (s *Storage) write(ctx context.Context, obj store.Object, values map[string]any, merge, status, batch bool, labels, fields store.Requirements, preconditions *store.Preconditions) error {
-	resource, err := store.GetResource(obj)
+	resource, err := s.core.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -445,7 +466,7 @@ func (s *Storage) write(ctx context.Context, obj store.Object, values map[string
 		if affected > 0 || batch {
 			return nil
 		}
-		return writeMiss(resource, id, labels, fields, preconditions)
+		return tx.writeMiss(ctx, resource, id, labels, fields, preconditions)
 	}
 	if plan.changesFinalizers {
 		return s.atomicMutation(ctx, run)
@@ -460,7 +481,7 @@ func (s *Storage) Delete(ctx context.Context, obj store.Object, options ...store
 	if opts.DryRun {
 		return errors.NewUnsupported("SQL store does not support dry-run")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := s.core.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -481,7 +502,7 @@ func (s *Storage) Delete(ctx context.Context, obj store.Object, options ...store
 		if err != nil {
 			return err
 		}
-		if store.PrepareObjectForDelete(current, policy) {
+		if prepareObjectForDelete(current, policy) {
 			_, err := tx.core.exec.ExecContext(ctx, "DELETE FROM "+tx.core.dialect.Quote(resource)+where, q.args...)
 			return tx.core.dialect.MapError(err, resource, obj.GetID())
 		}
@@ -502,7 +523,7 @@ func (s *Storage) DeleteBatch(ctx context.Context, list store.ObjectList, opts .
 	if options.DryRun {
 		return errors.NewUnsupported("SQL store does not support dry-run")
 	}
-	resource, err := store.GetResource(list)
+	resource, err := s.core.schema.ResourceName(list)
 	if err != nil {
 		return err
 	}
@@ -543,7 +564,7 @@ func (s *Storage) PatchBatch(ctx context.Context, list store.ObjectList, patch s
 	if options.DryRun {
 		return errors.NewUnsupported("SQL store does not support dry-run")
 	}
-	resource, err := store.GetResource(list)
+	resource, err := s.core.schema.ResourceName(list)
 	if err != nil {
 		return err
 	}
@@ -564,15 +585,22 @@ func (s *Storage) PatchBatch(ctx context.Context, list store.ObjectList, patch s
 // Count implements store.Store.
 func (s *Storage) Count(ctx context.Context, obj store.Object, options ...store.CountOption) (int, error) {
 	opts := store.ApplyCountOptions(options)
-	if opts.IncludeSubScopes {
-		return 0, errors.NewUnsupported("SQL store does not support querying descendant scopes")
+	if opts.IncludeSubScopes && len(s.scopes) > 0 {
+		return 0, errors.NewUnsupported("SQL descendant queries require the root scope")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := s.core.schema.ResourceName(obj)
 	if err != nil {
 		return 0, err
 	}
 	q := &QueryState{dialect: s.core.dialect}
-	where, err := s.whereClause(q, "", opts.LabelRequirements, opts.FieldRequirements)
+	builder := &ConditionBuilder{}
+	if !opts.IncludeSubScopes {
+		builder.Add(s.scopeCondition(q))
+	}
+	for _, scope := range s.scopes {
+		builder.Add(s.core.dialect.Quote(store.ScopeResourceToFieldName(scope.Resource)) + " = " + q.Bind(scope.Name))
+	}
+	err = s.addRequirementConditions(builder, q, opts.LabelRequirements, opts.FieldRequirements)
 	if err != nil {
 		return 0, err
 	}
@@ -581,9 +609,9 @@ func (s *Storage) Count(ctx context.Context, obj store.Object, options ...store.
 		return 0, err
 	}
 	if search != "" {
-		where += " AND " + search
+		builder.Add(search)
 	}
-	statement := "SELECT COUNT(*) FROM " + s.core.dialect.Quote(resource) + where
+	statement := "SELECT COUNT(*) FROM " + s.core.dialect.Quote(resource) + builder.Where()
 	var total int64
 	if err := s.core.exec.QueryRowContext(ctx, statement, q.args...).
 		Scan(&total); err != nil {
@@ -595,11 +623,11 @@ func (s *Storage) Count(ctx context.Context, obj store.Object, options ...store.
 // List implements store.Store with offset-based continuation and one-row lookahead.
 func (s *Storage) List(ctx context.Context, list store.ObjectList, options ...store.ListOption) error {
 	opts := store.ApplyListOptions(options)
-	if opts.IncludeSubScopes {
-		return errors.NewUnsupported("SQL store does not support querying descendant scopes")
+	if opts.IncludeSubScopes && len(s.scopes) > 0 {
+		return errors.NewUnsupported("SQL descendant queries require the root scope")
 	}
 
-	resource, err := store.GetResource(list)
+	resource, err := s.core.schema.ResourceName(list)
 	if err != nil {
 		return err
 	}
@@ -614,7 +642,9 @@ func (s *Storage) List(ctx context.Context, list store.ObjectList, options ...st
 	}
 	q := &QueryState{dialect: s.core.dialect}
 	builder := &ConditionBuilder{}
-	builder.Add(s.scopeCondition(q))
+	if !opts.IncludeSubScopes {
+		builder.Add(s.scopeCondition(q))
+	}
 	for _, scope := range s.scopes {
 		field := store.ScopeResourceToFieldName(scope.Resource)
 		builder.Add(s.core.dialect.Quote(field) + " = " + q.Bind(scope.Name))
@@ -696,7 +726,8 @@ func (s *Storage) lockLifecycle(ctx context.Context, resource, id string, labels
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		return nil, writeMiss(resource, id, labels, fields, preconditions)
+		rows.Close()
+		return nil, s.writeMiss(ctx, resource, id, labels, fields, preconditions)
 	}
 	current := &store.ObjectMeta{ID: id, Resource: resource}
 	if err := s.core.codec.ScanOne(rows, current); err != nil {

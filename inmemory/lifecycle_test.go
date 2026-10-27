@@ -1,4 +1,4 @@
-package store_test
+package inmemory
 
 import (
 	"encoding/json"
@@ -7,13 +7,12 @@ import (
 
 	"github.com/google/uuid"
 	"xiaoshiai.cn/store"
-	"xiaoshiai.cn/store/inmemory"
 )
 
 func TestPrepareObjectForCreateOwnsServerMetadata(t *testing.T) {
 	object := &store.ObjectMeta{UID: "caller", ResourceVersion: 7, Generation: 9}
 	scopes := []store.Scope{{Resource: "tenants", Name: "acme"}}
-	store.PrepareObjectForCreate(object, "widgets", scopes)
+	prepareObjectForCreate(object, "widgets", scopes)
 	if _, err := uuid.Parse(object.ID); err != nil {
 		t.Fatalf("ID = %q, want UUID: %v", object.ID, err)
 	}
@@ -37,16 +36,12 @@ type lifecycleCounter struct {
 func TestPrepareObjectForUpdatePreservesLargeIntegerChanges(t *testing.T) {
 	current := &lifecycleCounter{Count: 9007199254740992, Ratio: 1.5}
 	current.Status.Observed = 9007199254740993
-	store.PrepareObjectForCreate(current, "lifecyclecounters", nil)
+	prepareObjectForCreate(current, "lifecyclecounters", nil)
 	current.ResourceVersion = 1
 	desired := *current
 	desired.Count++
 	desired.Status.Observed = 0
-	schema := store.NewSchema()
-	if err := schema.Register(&lifecycleCounter{}, store.ResourceSchema{GenerationFields: []string{"count", "ratio"}}); err != nil {
-		t.Fatal(err)
-	}
-	deleteNow, err := schema.PrepareObjectForUpdate(current, &desired, false)
+	deleteNow, err := prepareObjectForUpdate(current, &desired, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,14 +72,9 @@ func TestGenerationTrackingComparesExactJSONNumbers(t *testing.T) {
 		{"nested changed", []any{int64(9007199254740993)}, []any{int64(9007199254740992)}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			schema := store.NewSchema()
-			model := &store.Unstructured{Object: map[string]any{"resource": "numbers"}}
-			if err := schema.Register(model, store.ResourceSchema{GenerationFields: []string{"value"}}); err != nil {
-				t.Fatal(err)
-			}
 			current := &store.Unstructured{Object: map[string]any{"resource": "numbers", "value": test.current, "generation": int64(3), "status": "old"}}
 			desired := &store.Unstructured{Object: map[string]any{"resource": "numbers", "value": test.desired, "generation": int64(4), "status": "new"}}
-			if _, err := schema.PrepareObjectForUpdate(current, desired, false); err != nil {
+			if _, err := prepareObjectForUpdate(current, desired, false); err != nil {
 				t.Fatal(err)
 			}
 			if equal := desired.GetGeneration() == 3; equal != test.equal {
@@ -97,10 +87,10 @@ func TestGenerationTrackingComparesExactJSONNumbers(t *testing.T) {
 
 func TestStoreCreateUpdatePreservesIntegerFactsAndGeneration(t *testing.T) {
 	schema := store.NewSchema()
-	if err := schema.Register(&lifecycleCounter{}, store.ResourceSchema{GenerationFields: []string{"count", "ratio"}}); err != nil {
+	if err := schema.Register(&lifecycleCounter{}, store.ResourceSchema{ResourceName: "lifecyclecounters"}); err != nil {
 		t.Fatal(err)
 	}
-	storage, err := inmemory.New(schema)
+	storage, err := New(schema)
 	if err != nil {
 		t.Fatal(err)
 	}

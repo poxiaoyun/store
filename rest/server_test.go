@@ -34,13 +34,9 @@ type remoteSchemaObject struct {
 	store.ObjectMeta `json:",inline"`
 }
 
-func (*remoteSchemaObject) ResourceName() string { return "remote-schema-tests" }
-
 type remoteSchemaMutationObject struct {
 	store.ObjectMeta `json:",inline"`
 }
-
-func (*remoteSchemaMutationObject) ResourceName() string { return "remote-schema-mutations" }
 
 func (s *optionCaptureStore) Scope(...store.Scope) store.Store {
 	return s
@@ -101,7 +97,7 @@ func TestRemoteStorePing(t *testing.T) {
 
 func TestRemoteStoreSchemaSnapshot(t *testing.T) {
 	schema := store.NewSchema()
-	if err := schema.Register(&remoteSchemaObject{}, store.ResourceSchema{}); err != nil {
+	if err := schema.Register(&remoteSchemaObject{}, store.ResourceSchema{ResourceName: "remote-schema-tests"}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	serverURL, err := url.Parse("https://store.example")
@@ -109,13 +105,13 @@ func TestRemoteStoreSchemaSnapshot(t *testing.T) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	remote := NewRemoteStore(serverURL, schema, store.Capabilities{})
-	if err := schema.Register(&remoteSchemaMutationObject{}, store.ResourceSchema{}); err != nil {
+	if err := schema.Register(&remoteSchemaMutationObject{}, store.ResourceSchema{ResourceName: "remote-schema-mutations"}); err != nil {
 		t.Fatalf("source schema Register() error = %v", err)
 	}
 
 	scoped := remote.Scope(store.Scope{Resource: "tenants", Name: "tenant-a"})
 	snapshot := scoped.Schema()
-	if err := snapshot.Register(&remoteSchemaMutationObject{}, store.ResourceSchema{}); err != nil {
+	if err := snapshot.Register(&remoteSchemaMutationObject{}, store.ResourceSchema{ResourceName: "remote-schema-mutations"}); err != nil {
 		t.Fatalf("Schema().Register() error = %v", err)
 	}
 	remoteSchema := remote.Schema()

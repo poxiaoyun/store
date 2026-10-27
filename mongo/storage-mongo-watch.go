@@ -34,7 +34,7 @@ func (m *MongoStorage) Watch(ctx context.Context, obj store.ObjectList, opts ...
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return nil, err
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := m.core.schema.ResourceName(obj)
 	if err != nil {
 		return nil, err
 	}

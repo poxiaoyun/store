@@ -137,9 +137,11 @@ func ToDriverValue(v reflect.Value) any {
 	case reflect.Bool:
 		return v.Bool()
 	}
-	// is nil pointer
-	if v.Kind() == reflect.Ptr && v.IsNil() {
-		return nil
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		return ToDriverValue(v.Elem())
 	}
 	return &JsonValuer{Source: v.Interface()}
 }
@@ -445,6 +447,11 @@ func ToDriverScanner(into reflect.Value) any {
 	if scanner, ok := reflect.TypeAssert[sql.Scanner](into); ok {
 		return scanner
 	}
+	if into.Kind() == reflect.Slice && into.Type().
+		Elem().
+		Kind() == reflect.Uint8 {
+		return &binaryScanner{dest: into}
+	}
 	switch into.Interface().(type) {
 	case time.Time:
 		return into.Addr().
@@ -476,6 +483,22 @@ func ToDriverScanner(into reflect.Value) any {
 		return into.Addr().
 			Interface()
 	}
+}
+
+type binaryScanner struct{ dest reflect.Value }
+
+func (s *binaryScanner) Scan(value any) error {
+	switch value := value.(type) {
+	case nil:
+		s.dest.SetZero()
+	case []byte:
+		s.dest.SetBytes(append([]byte(nil), value...))
+	case string:
+		s.dest.SetBytes([]byte(value))
+	default:
+		return fmt.Errorf("cannot scan %T into a binary field", value)
+	}
+	return nil
 }
 
 type AnyScanner struct {

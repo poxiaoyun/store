@@ -8,13 +8,22 @@ import (
 	"xiaoshiai.cn/store"
 )
 
+type unstructuredCounter struct {
+	store.ObjectMeta `json:",inline"`
+	Count            int64   `json:"count"`
+	Ratio            float64 `json:"ratio"`
+	Status           struct {
+		Observed int64 `json:"observed"`
+	} `json:"status"`
+}
+
 func TestUnstructuredJSONPreservesInt64AcrossTypedConversion(t *testing.T) {
 	encoded := []byte(`{"count":9007199254740993,"ratio":1.5,"status":{"observed":9223372036854775807}}`)
 	var object store.Unstructured
 	if err := json.Unmarshal(encoded, &object); err != nil {
 		t.Fatal(err)
 	}
-	var converted lifecycleCounter
+	var converted unstructuredCounter
 	if err := store.FromUnstructured(&object, &converted); err != nil {
 		t.Fatal(err)
 	}

@@ -47,8 +47,6 @@ type timestampObject struct {
 	StartedAt        time.Time  `json:"startedAt"`
 }
 
-func (*timestampObject) ResourceName() string { return "timestampobjects" }
-
 func TestModelFieldsFollowDeclarationOrder(t *testing.T) {
 	codec := storesql.NewModelCodec()
 	fields, err := codec.ModelFields(&timestampObject{})

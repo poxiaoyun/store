@@ -193,6 +193,10 @@ type PatchType string
 const (
 	PatchTypeJSONPatch  PatchType = "application/json-patch+json"
 	PatchTypeMergePatch PatchType = "application/merge-patch+json"
+	// PatchTypeFieldPatch carries relative field operations such as set, unset
+	// and inc. A backend that supports it applies the operations, conditions,
+	// ResourceVersion and Generation changes in one native write.
+	PatchTypeFieldPatch PatchType = "application/field-patch+json"
 )
 
 type Patch interface {
@@ -268,9 +272,12 @@ type Store interface {
 	Update(ctx context.Context, obj Object, opts ...UpdateOption) error
 	// Patch atomically applies a supported patch to the latest stored object.
 	// Success does not refresh obj. Unsupported formats are rejected without effects.
+	// A field patch carries relative operations and applies them in order, so it
+	// must not require a preceding read by the caller.
 	// The object's
 	// ResourceVersion is not a precondition; a non-zero resourceVersion in a
 	// merge patch or a JSON Patch test operation makes the patch conditional.
+	// Field patches use WithPreconditions for version conditions.
 	Patch(ctx context.Context, obj Object, patch Patch, opts ...PatchOption) error
 	// PatchBatch applies patch to objects of the list's resource that match the
 	// supplied selectors in the current scope. Each object follows Patch

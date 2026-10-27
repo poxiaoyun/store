@@ -50,6 +50,10 @@ func mergeValues(patch store.Patch, obj store.Object) (map[string]any, error) {
 
 func documentType(t reflect.Type) bool {
 	t = DerefType(t)
+	if t.Kind() == reflect.Slice && t.Elem().
+		Kind() == reflect.Uint8 {
+		return false
+	}
 	switch t.Kind() {
 	case reflect.Map, reflect.Struct, reflect.Interface, reflect.Slice, reflect.Array:
 		return !IsTimeType(t)
@@ -87,7 +91,7 @@ type writePlan struct {
 }
 
 func (s *Storage) planWrite(q *QueryState, obj store.Object, values map[string]any, merge, status bool) (writePlan, error) {
-	resource, err := store.GetResource(obj)
+	resource, err := s.core.schema.ResourceName(obj)
 	if err != nil {
 		return writePlan{}, err
 	}
@@ -106,7 +110,7 @@ func (s *Storage) planWrite(q *QueryState, obj store.Object, values map[string]a
 	if _, ok := types["status"]; status && !ok {
 		return writePlan{}, errors.NewUnsupported("resource has no status")
 	}
-	owned := append(store.ServerOwnedUpdateFields(), "generation")
+	owned := append(serverOwnedUpdateFields, "generation")
 	for _, scope := range s.scopes {
 		owned = append(owned, store.ScopeResourceToFieldName(scope.Resource))
 	}
@@ -165,11 +169,11 @@ func (s *Storage) planWrite(q *QueryState, obj store.Object, values map[string]a
 	}
 	changes := []string{}
 	if !status {
-		for _, name := range definition.GenerationFields {
-			value, exists := writable[name]
-			if !exists {
+		for _, name := range sortedKeys(writable) {
+			if slices.Contains(generationIgnoredFields, name) {
 				continue
 			}
+			value := writable[name]
 			left := s.core.dialect.Quote(name)
 			if types[name].Type.Kind() != reflect.Pointer && !IsTimeType(types[name].Type) {
 				left = "COALESCE(" + left + ", " + q.Bind(ToDriverValue(reflect.Zero(types[name].Type))) + ")"

@@ -32,7 +32,7 @@ func (c *generic) Watch(ctx context.Context, obj store.ObjectList, opts ...store
 	if err := c.core.validateObject(obj); err != nil {
 		return nil, err
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := c.core.schema.ResourceName(obj)
 	if err != nil {
 		return nil, err
 	}

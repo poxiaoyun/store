@@ -1,12 +1,16 @@
 package sql_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	commonerrors "xiaoshiai.cn/common/errors"
@@ -19,7 +23,8 @@ import (
 	"xiaoshiai.cn/store/storetest"
 )
 
-func TestMySQLStoreConformance(t *testing.T) {
+func mysqlDSN(t *testing.T) string {
+	t.Helper()
 	connection, err := url.Parse(testmysql.RequireURI(t))
 	if err != nil {
 		t.Fatal(err)
@@ -29,11 +34,82 @@ func TestMySQLStoreConformance(t *testing.T) {
 	config.Passwd, _ = connection.User.Password()
 	config.Net, config.Addr = "tcp", connection.Host
 	config.DBName = strings.TrimPrefix(connection.Path, "/")
-	runSQLStoreConformance(t, universal.DriverMySQL, config.FormatDSN(), false)
+	return config.FormatDSN()
+}
+
+func TestMySQLStoreConformance(t *testing.T) {
+	runSQLStoreConformance(t, universal.DriverMySQL, mysqlDSN(t), false)
 }
 
 func TestPostgreSQLStoreConformance(t *testing.T) {
 	runSQLStoreConformance(t, universal.DriverPostgres, testpostgresql.RequireURI(t), true)
+}
+
+// binaryRecord exercises native binary columns and nullable timestamps together.
+type binaryRecord struct {
+	Alias            json.RawMessage `json:"alias"`
+	store.ObjectMeta `json:",inline"`
+	Payload          []byte     `json:"payload"`
+	Completed        *time.Time `json:"completed"`
+}
+
+func TestPostgreSQLBinaryRoundTrip(t *testing.T) {
+	runBinaryRoundTrip(t, universal.DriverPostgres, testpostgresql.RequireURI(t))
+}
+
+func TestMySQLBinaryRoundTrip(t *testing.T) {
+	runBinaryRoundTrip(t, universal.DriverMySQL, mysqlDSN(t))
+}
+
+func runBinaryRoundTrip(t *testing.T, driver, dsn string) {
+	t.Helper()
+	db, dialect, err := universal.Open(t.Context(), driver, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	schema := store.NewSchema()
+	if err := schema.Register(&binaryRecord{}, store.ResourceSchema{}); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := storesql.NewStorage(t.Context(), schema, db, dialect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := binaryRecord{Payload: []byte{0, 255, 34, 128}}
+	if err := storage.Create(t.Context(), &value); err != nil {
+		t.Fatal(err)
+	}
+	var saved binaryRecord
+	if err := storage.Get(t.Context(), value.ID, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(saved.Payload, value.Payload) || saved.Completed != nil {
+		t.Fatal(saved)
+	}
+	now := time.Now().
+		UTC().
+		Truncate(time.Microsecond)
+	saved.Payload = []byte("updated")
+	saved.Completed = &now
+	if err := storage.Update(t.Context(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Get(t.Context(), value.ID, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if string(saved.Payload) != "updated" || saved.Completed == nil || !saved.Completed.Equal(now) {
+		t.Fatal(saved)
+	}
+	if err := storage.Patch(t.Context(), &saved, store.RawPatch(store.PatchTypeMergePatch, []byte(`{"payload":"AP8=","completed":null}`))); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Get(t.Context(), value.ID, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(saved.Payload, []byte{0, 255}) || saved.Completed != nil {
+		t.Fatal(saved)
+	}
 }
 
 func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
@@ -49,6 +125,33 @@ func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
 		t.Cleanup(func() { _ = db.Close() })
 		return db, dialect
 	}
+	t.Run("canceled transaction rolls back and preserves cause", func(t *testing.T) {
+		db, dialect := open(t)
+		schema := store.NewSchema()
+		if err := schema.Register(&binaryRecord{}, store.ResourceSchema{}); err != nil {
+			t.Fatal(err)
+		}
+		storage, err := storesql.NewStorage(t.Context(), schema, db, dialect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		value := binaryRecord{Payload: []byte("rollback")}
+		err = storage.Transaction(ctx, func(ctx context.Context, tx store.Store) error {
+			if err := tx.Create(ctx, &value); err != nil {
+				return err
+			}
+			cancel()
+			return nil
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled transaction: %v", err)
+		}
+		if err := storage.Get(t.Context(), value.ID, &binaryRecord{}); !commonerrors.IsNotFound(err) {
+			t.Fatalf("canceled transaction persisted a record: %v", err)
+		}
+	})
 	if isPostgres {
 		t.Run("identity checks target relation", func(t *testing.T) {
 			db, dialect := open(t)
@@ -117,6 +220,58 @@ func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
 			}
 		})
 	}
+
+	t.Run("explicit root descendant queries", func(t *testing.T) {
+		db, dialect := open(t)
+		schema := store.NewSchema()
+		if err := schema.Register(&storetest.Object{}, store.ResourceSchema{ScopeKeys: []string{"tenant"}}); err != nil {
+			t.Fatal(err)
+		}
+		storage, err := storesql.NewStorage(t.Context(), schema, db, dialect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = db.ExecContext(context.Background(), "DROP TABLE storetests") })
+		for _, name := range []string{"", "a", "b"} {
+			var target store.Store = storage
+			if name != "" {
+				target = storage.Scope(store.Scope{Resource: "tenants", Name: name})
+			}
+			if err := target.Create(t.Context(), &storetest.Object{Value: "pending"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		root := &store.List[storetest.Object]{}
+		if err := storage.List(t.Context(), root); err != nil {
+			t.Fatal(err)
+		}
+		if len(root.Items) != 1 {
+			t.Fatal("ordinary root read escaped scope", root)
+		}
+		count, err := storage.Count(t.Context(), &storetest.Object{}, store.WithSubScopes(), store.WithFieldRequirementsFromSet(map[string]string{"value": "pending"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 3 {
+			t.Fatalf("descendant count=%d", count)
+		}
+		all := &store.List[storetest.Object]{}
+		if err := storage.List(t.Context(), all, store.WithSubScopes(), store.WithSort("id+"), store.WithContinue("", 2)); err != nil {
+			t.Fatal(err)
+		}
+		if len(all.Items) != 2 || all.Continue == "" {
+			t.Fatal(all)
+		}
+		if err := storage.List(t.Context(), all, store.WithSubScopes(), store.WithSort("id+"), store.WithContinue(all.Continue, 2)); err != nil {
+			t.Fatal(err)
+		}
+		if len(all.Items) != 1 || all.Continue != "" {
+			t.Fatal(all)
+		}
+		if err := storage.Get(t.Context(), all.Items[0].ID, &storetest.Object{}); err != nil && !commonerrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+	})
 	capabilities := store.Capabilities{Finalizers: true, OptimisticLock: true}
 	t.Run("nested unique index survives reconstruction", func(t *testing.T) {
 		db, dialect := open(t)
@@ -170,7 +325,7 @@ func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
 	t.Run("native patch round trips", func(t *testing.T) {
 		db, dialect := open(t)
 		schema := store.NewSchema()
-		if err := schema.Register(&storetest.Object{}, store.ResourceSchema{GenerationFields: []string{"value"}}); err != nil {
+		if err := schema.Register(&storetest.Object{}, store.ResourceSchema{}); err != nil {
 			t.Fatal(err)
 		}
 		measured := &measuredExecutor{Database: db}
@@ -317,20 +472,21 @@ func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
 		}
 	})
 	storetest.Run(t, storetest.Fixture{
-		ResourceWideIDs: true,
-		MergePatchOnly:  true, BatchFinalizerRemovalOnly: true,
-		Capabilities:     capabilities,
-		Continue:         true,
-		LabelSelector:    true,
-		FieldSelector:    true,
-		Search:           true,
-		Sort:             true,
-		Projection:       true,
-		DeleteBatch:      true,
-		PatchBatch:       true,
-		Transaction:      true,
-		SecondaryIndexes: true,
-		UniqueIndexes:    true,
+		ResourceWideIDs:           true,
+		MergePatchOnly:            true,
+		BatchFinalizerRemovalOnly: true,
+		Capabilities:              capabilities,
+		Continue:                  true,
+		LabelSelector:             true,
+		FieldSelector:             true,
+		Search:                    true,
+		Sort:                      true,
+		Projection:                true,
+		DeleteBatch:               true,
+		PatchBatch:                true,
+		Transaction:               true,
+		SecondaryIndexes:          true,
+		UniqueIndexes:             true,
 
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
 			db, dialect := open(t)

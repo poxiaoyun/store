@@ -28,14 +28,9 @@ type Object struct {
 	Status                 ObjectStatus `json:"status"`
 }
 
-// ResourceName implements commonstore.ResourcedObject.
-func (*Object) ResourceName() string { return "storetests" }
-
 type schemaMutationObject struct {
 	commonstore.ObjectMeta `json:",inline"`
 }
-
-func (*schemaMutationObject) ResourceName() string { return "storetestmutations" }
 
 // ObjectStatus is the status subresource used by the conformance suite.
 type ObjectStatus struct {
@@ -54,6 +49,10 @@ type Fixture struct {
 	ResourceWideIDs bool
 	// MergePatchOnly declares that JSON Patch must be rejected without effects.
 	MergePatchOnly bool
+	// JSONPatchSetOnly declares that JSON Patch supports only object-field add,
+	// replace and remove. test, copy, move, array paths and lifecycle fields must
+	// be rejected with Unsupported.
+	JSONPatchSetOnly bool
 	// BatchFinalizerRemovalOnly excludes assigning nonempty finalizers in a batch.
 	BatchFinalizerRemovalOnly bool
 
@@ -98,29 +97,6 @@ func Run(t *testing.T, fixture Fixture) {
 	runWriteOptions(t, fixture)
 	runFinalizers(t, fixture)
 	runMutationConditions(t, fixture)
-	t.Run("generation without declared fields", func(t *testing.T) {
-		schema := commonstore.NewSchema()
-		if err := schema.Register(&Object{}, commonstore.ResourceSchema{}); err != nil {
-			t.Fatal(err)
-		}
-		storage, err := fixture.New(t, schema)
-		if err != nil {
-			t.Fatal(err)
-		}
-		object := &Object{Value: "before"}
-		if err := storage.Create(t.Context(), object); err != nil {
-			t.Fatal(err)
-		}
-		if err := storage.Patch(t.Context(), object, commonstore.MapMergePatch{"value": "after"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := storage.Get(t.Context(), object.ID, object); err != nil {
-			t.Fatal(err)
-		}
-		if object.Value != "after" || object.Generation != 1 {
-			t.Fatalf("untracked change = %#v, want value after, generation 1", object)
-		}
-	})
 	if !fixture.Capabilities.OptimisticLock {
 		for _, operation := range []string{"update", "status update", "patch", "status patch", "merge patch", "status merge patch", "JSON patch", "status JSON patch", "delete"} {
 			t.Run("unsupported version condition/"+operation, func(t *testing.T) {
@@ -887,7 +863,7 @@ func Run(t *testing.T, fixture Fixture) {
             {"op":"test","path":"/resourceVersion","value":%d},
             {"op":"replace","path":"/value","value":"two"}
         ]`, object.ResourceVersion)))
-		if fixture.MergePatchOnly {
+		if fixture.MergePatchOnly || fixture.JSONPatchSetOnly {
 			rejectPatch(t, storage, object, patch)
 			return
 		}
@@ -919,7 +895,7 @@ func Run(t *testing.T, fixture Fixture) {
             {"op":"test","path":"/resourceVersion","value":%d},
             {"op":"replace","path":"/value","value":"stale"}
         ]`, staleVersion)))
-		if fixture.MergePatchOnly {
+		if fixture.MergePatchOnly || fixture.JSONPatchSetOnly {
 			rejectPatch(t, storage, object, patch)
 			return
 		}
@@ -933,6 +909,51 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		if got.Value != "two" {
 			t.Fatalf("stale Patch() stored value = %q, want two", got.Value)
+		}
+	})
+	t.Run("JSON patch replaces object fields", func(t *testing.T) {
+		storage := NewStore(t, fixture)
+		object := &Object{Value: "one", Rank: 1, Status: ObjectStatus{Phase: "pending"}}
+		if err := storage.Create(t.Context(), object); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		patch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[
+			{"op":"replace","path":"/value","value":"two"},
+			{"op":"add","path":"/rank","value":2}
+		]`))
+		if fixture.MergePatchOnly {
+			rejectPatch(t, storage, object, patch)
+			return
+		}
+		if err := storage.Patch(t.Context(), object, patch); err != nil {
+			t.Fatalf("Patch() error = %v", err)
+		}
+		stored := &Object{}
+		if err := storage.Get(t.Context(), object.ID, stored); err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if stored.Value != "two" || stored.Rank != 2 {
+			t.Fatalf("JSON patch result = %#v", stored)
+		}
+		remove := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[{"op":"remove","path":"/rank"}]`))
+		if err := storage.Patch(t.Context(), object, remove); err != nil {
+			t.Fatalf("JSON patch remove error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, stored); err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if stored.Rank != 0 {
+			t.Fatalf("JSON patch remove result = %#v", stored)
+		}
+		statusPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[{"op":"replace","path":"/status/phase","value":"ready"}]`))
+		if err := storage.Status().Patch(t.Context(), object, statusPatch); err != nil {
+			t.Fatalf("status JSON patch error = %v", err)
+		}
+		if err := storage.Get(t.Context(), object.ID, stored); err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if stored.Status.Phase != "ready" {
+			t.Fatalf("status JSON patch result = %#v", stored)
 		}
 	})
 	t.Run("patch lowers a business field to its zero value", func(t *testing.T) {
@@ -1225,7 +1246,7 @@ func Run(t *testing.T, fixture Fixture) {
 	t.Run("unique indexes", func(t *testing.T) {
 		if !fixture.UniqueIndexes {
 			schema := commonstore.NewSchema()
-			if err := schema.Register(&Object{}, commonstore.ResourceSchema{Indexes: []commonstore.Index{
+			if err := schema.Register(&Object{}, commonstore.ResourceSchema{ResourceName: "storetests", Indexes: []commonstore.Index{
 				{Fields: []string{"value"}, Unique: true},
 			}}); err != nil {
 				t.Fatal(err)
@@ -1380,7 +1401,7 @@ func Run(t *testing.T, fixture Fixture) {
 		// expression over the latest row rather than a reason to read it.
 		copied := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "ops"}}
 		copyPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[{"op":"copy","from":"/value","path":"/tenant"}]`))
-		if fixture.MergePatchOnly {
+		if fixture.MergePatchOnly || fixture.JSONPatchSetOnly {
 			rejectPatch(t, storage, copied, copyPatch)
 			return
 		}
@@ -1591,7 +1612,7 @@ func runFinalizers(t *testing.T, fixture Fixture) {
 			case "JSON patch":
 				err = storage.Patch(t.Context(), object, commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(`[{"op":"replace","path":"/finalizers","value":["example.com/new"]}]`)))
 			}
-			if fixture.MergePatchOnly && operation == "JSON patch" {
+			if (fixture.MergePatchOnly || fixture.JSONPatchSetOnly) && operation == "JSON patch" {
 				if !commonerrors.IsUnsupported(err) {
 					t.Fatalf("JSON patch = %v, want Unsupported", err)
 				}
@@ -2090,7 +2111,7 @@ func ObjectIDs(items []Object) []string {
 func NewStore(t testing.TB, fixture Fixture) commonstore.Store {
 	t.Helper()
 	schema := commonstore.NewSchema()
-	definition := commonstore.ResourceSchema{ScopeKeys: []string{"tenant"}, GenerationFields: []string{"value", "rank"}}
+	definition := commonstore.ResourceSchema{ResourceName: "storetests", ScopeKeys: []string{"tenant"}, StatusResource: true}
 	if fixture.SecondaryIndexes {
 		definition.Indexes = append(definition.Indexes, commonstore.Index{Name: "rank", Fields: []string{"rank"}})
 	}
@@ -2299,7 +2320,11 @@ func runMutationConditions(t *testing.T, fixture Fixture) {
 					}
 					err = storage.Delete(t.Context(), object, options...)
 				}
-				if !commonerrors.IsConflict(err) {
+				if condition == "missing versioned object" {
+					if !commonerrors.IsNotFound(err) {
+						t.Fatalf("conditional %s = %v, want NotFound", operation, err)
+					}
+				} else if !commonerrors.IsConflict(err) {
 					t.Fatalf("conditional %s = %v, want Conflict", operation, err)
 				}
 				after := &Object{}

@@ -19,6 +19,7 @@ import (
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/log"
 	"xiaoshiai.cn/store"
+	"xiaoshiai.cn/store/inmemory"
 )
 
 var ErrResourceVersionSetOnCreate = stderrors.New("resourceVersion should not be set on objects to be created")
@@ -180,7 +181,7 @@ func (e *EtcdStore) Count(ctx context.Context, obj store.Object, opts ...store.C
 	if options.Search != "" || len(options.SearchFields) != 0 {
 		return 0, errors.NewUnsupported("etcd store does not support search")
 	}
-	resource, err := store.GetResource(obj)
+	resource, err := e.core.schema.ResourceName(obj)
 	if err != nil {
 		return 0, err
 	}
@@ -200,7 +201,7 @@ func (e *EtcdStore) Count(ctx context.Context, obj store.Object, opts ...store.C
 
 // Create implements Store.
 func (e *EtcdStore) Create(ctx context.Context, obj store.Object, opts ...store.CreateOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := e.core.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -214,7 +215,7 @@ func (e *EtcdStore) Create(ctx context.Context, obj store.Object, opts ...store.
 	if creatoptions.TTL != 0 && len(obj.GetFinalizers()) != 0 {
 		return errors.NewBadRequest("TTL cannot be combined with finalizers")
 	}
-	store.PrepareObjectForCreate(obj, resource, e.scopes)
+	prepareObjectForCreate(obj, resource, e.scopes)
 
 	preparedKey := e.core.getkey(e.scopes, resource, obj.GetID())
 
@@ -256,10 +257,8 @@ func keyHasRevision(key string, rev int64) clientv3.Cmp {
 }
 
 // Delete implements Store.
-func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) (result error) {
+func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.DeleteOption) error {
 	deleteoptions := store.ApplyDeleteOptions(opts)
-	conditional := len(deleteoptions.LabelRequirements)+len(deleteoptions.FieldRequirements) > 0 || deleteoptions.Preconditions != nil && (deleteoptions.Preconditions.UID != nil || deleteoptions.Preconditions.ResourceVersion != nil)
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if deleteoptions.DryRun {
 		return errors.NewUnsupported("etcd store does not support dry-run")
 	}
@@ -285,7 +284,7 @@ func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.
 		if err := store.ValidateDeleteRequirements(current, deleteoptions.LabelRequirements, deleteoptions.FieldRequirements); err != nil {
 			return err
 		}
-		if store.PrepareObjectForDelete(current, policy) {
+		if prepareObjectForDelete(current, policy) {
 			if err := e.core.directDelete(ctx, e.scopes, current, current.GetResourceVersion()); err != nil {
 				if errors.IsConflict(err) {
 					continue
@@ -301,7 +300,7 @@ func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.
 			if err := store.ValidateDeleteRequirements(latest, deleteoptions.LabelRequirements, deleteoptions.FieldRequirements); err != nil {
 				return nil, err
 			}
-			store.PrepareObjectForDelete(latest, policy)
+			prepareObjectForDelete(latest, policy)
 			return latest, nil
 		}
 		return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{})
@@ -310,7 +309,7 @@ func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.
 
 // Get implements Store.
 func (e *EtcdStore) Get(ctx context.Context, name string, obj store.Object, opts ...store.GetOption) error {
-	resource, err := store.GetResource(obj)
+	resource, err := e.core.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -344,7 +343,7 @@ const maxLimit = 10000
 
 // List implements Store.
 func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...store.ListOption) error {
-	resource, err := store.GetResource(list)
+	resource, err := e.core.schema.ResourceName(list)
 	if err != nil {
 		return err
 	}
@@ -448,9 +447,8 @@ func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...sto
 }
 
 // Patch implements Store.
-func (e *EtcdStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
+func (e *EtcdStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
 	options := store.ApplyPatchOptions(opts)
-	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
 	if options.DryRun {
 		return errors.NewUnsupported("etcd store does not support dry-run")
 	}
@@ -465,10 +463,10 @@ func (e *EtcdStore) Patch(ctx context.Context, obj store.Object, patch store.Pat
 		if err := store.CopyObject(current, desired); err != nil {
 			return nil, err
 		}
-		if err := store.ApplyPatch(desired, obj, patch); err != nil {
+		if err := inmemory.ApplyPatch(desired, obj, patch); err != nil {
 			return nil, err
 		}
-		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, false)
+		_, err := prepareObjectForUpdate(current, desired, false)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -488,10 +486,8 @@ func (e *EtcdStore) Status() store.StatusStorage {
 }
 
 // Update implements Store.
-func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
+func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
 	options := store.ApplyUpdateOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.DryRun {
 		return errors.NewUnsupported("etcd store does not support dry-run")
 	}
@@ -513,7 +509,7 @@ func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.
 		if err := store.CopyObject(requested, desired); err != nil {
 			return nil, err
 		}
-		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, false)
+		_, err := prepareObjectForUpdate(current, desired, false)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -531,9 +527,8 @@ type EtcdStatusStore struct {
 }
 
 // Patch implements StatusStorage.
-func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) (result error) {
+func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
 	options := store.ApplyPatchOptions(opts)
-	defer func() { result = store.PatchWriteError(result, obj, patch, options) }()
 	if options.DryRun {
 		return errors.NewUnsupported("etcd store does not support dry-run")
 	}
@@ -548,10 +543,10 @@ func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch sto
 		if err := store.CopyObject(current, desired); err != nil {
 			return nil, err
 		}
-		if err := store.ApplyPatch(desired, obj, patch); err != nil {
+		if err := inmemory.ApplyPatch(desired, obj, patch); err != nil {
 			return nil, err
 		}
-		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, true)
+		_, err := prepareObjectForUpdate(current, desired, true)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -561,14 +556,12 @@ func (e *EtcdStatusStore) Patch(ctx context.Context, obj store.Object, patch sto
 }
 
 // Update implements StatusStorage.
-func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) (result error) {
-	resource, err := store.GetResource(obj)
+func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...store.UpdateOption) error {
+	resource, err := e.core.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
 	options := store.ApplyUpdateOptions(opts)
-	conditional := len(options.LabelRequirements)+len(options.FieldRequirements) > 0 || obj.GetResourceVersion() != 0
-	defer func() { result = store.WriteError(result, obj, conditional) }()
 	if options.TTL != 0 {
 		return errors.NewUnsupported("status updates cannot set TTL")
 	}
@@ -593,7 +586,7 @@ func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...
 		if err := store.CopyObject(requested, desired); err != nil {
 			return nil, err
 		}
-		_, err := e.core.schema.PrepareObjectForUpdate(current, desired, true)
+		_, err := prepareObjectForUpdate(current, desired, true)
 		return desired, err
 	}
 	return e.core.tryUpdate(ctx, e.scopes, obj, updatefunc, tryUpdateOptions{
@@ -679,7 +672,7 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 		return errors.NewBadRequest("id is required")
 	}
 	id := obj.GetID()
-	resource, err := store.GetResource(obj)
+	resource, err := e.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}
@@ -706,7 +699,7 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 		}
 		if !store.MatchLabelReqirements(current, options.LabelRequirements) ||
 			!store.MatchUnstructuredFieldRequirments(unstructured, options.FieldRequirements) {
-			return errors.NewNotFound(resource, id)
+			return errors.NewConflict(resource, id, fmt.Errorf("write conditions did not match"))
 		}
 		updated, err := do(current)
 		if err != nil {
@@ -839,7 +832,7 @@ func (s *etcdStoreCore) decodeGetResp(getResp *clientv3.GetResponse, into store.
 }
 
 func (e *etcdStoreCore) directDelete(ctx context.Context, scopes []store.Scope, obj store.Object, resourceVersion int64) error {
-	resource, err := store.GetResource(obj)
+	resource, err := e.schema.ResourceName(obj)
 	if err != nil {
 		return err
 	}

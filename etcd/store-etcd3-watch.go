@@ -24,7 +24,7 @@ const (
 
 // Watch implements Store.
 func (e *EtcdStore) Watch(ctx context.Context, obj store.ObjectList, opts ...store.WatchOption) (store.Watcher, error) {
-	resource, err := store.GetResource(obj)
+	resource, err := e.core.schema.ResourceName(obj)
 	if err != nil {
 		return nil, err
 	}

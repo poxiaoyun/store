@@ -272,8 +272,6 @@ type indexedObject struct {
 	Email            string `json:"email,omitempty"`
 }
 
-func (*indexedObject) ResourceName() string { return "indexedobjects" }
-
 func TestListAppliesUnindexedFieldRequirements(t *testing.T) {
 	client := testserver.RunEtcd(t, nil)
 	schema := store.NewSchema()

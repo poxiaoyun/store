@@ -37,12 +37,14 @@ type FieldSpec struct {
 
 // ResourceSchema describes one resource and the indexes required by stores.
 type ResourceSchema struct {
-	Object    Object
-	ScopeKeys []string
-	Indexes   []Index
-	// GenerationFields are business field paths whose changes advance Generation.
-	// An empty declaration leaves Generation at its initial value.
-	GenerationFields []string
+	Object Object
+	// ResourceName is the resource name. Empty derives a default name from Object.
+	ResourceName string
+	// StatusResource declares that the resource exposes the status subresource.
+	// A typed resource must also declare a status field.
+	StatusResource bool
+	ScopeKeys      []string
+	Indexes        []Index
 	// FieldSpecs declare per-field storage attributes. A name must be unique
 	// and must match a field of Object, so a declared attribute can never be
 	// silently ignored.
@@ -59,10 +61,14 @@ func (r ResourceSchema) IsPrimaryIndex(index Index) bool {
 type Schema struct {
 	mu        sync.RWMutex
 	resources map[string]ResourceSchema
+	types     map[reflect.Type]string
 }
 
 func NewSchema() *Schema {
-	return &Schema{resources: map[string]ResourceSchema{}}
+	return &Schema{
+		resources: map[string]ResourceSchema{},
+		types:     map[reflect.Type]string{},
+	}
 }
 
 func (s *Schema) Register(obj Object, definition ResourceSchema) error {
@@ -74,17 +80,27 @@ func (s *Schema) Register(obj Object, definition ResourceSchema) error {
 		IsNil() {
 		return fmt.Errorf("object is nil")
 	}
-	resource, err := GetResource(obj)
-	if err != nil {
-		return err
+	resource := definition.ResourceName
+	var err error
+	if resource == "" {
+		resource, err = ReflectResourceName(reflect.TypeOf(obj))
+		if err != nil {
+			return err
+		}
 	}
 	if !resourceOrIndexNamePattern.MatchString(resource) {
 		return fmt.Errorf("resource name %q is invalid", resource)
 	}
+	definition.ResourceName = resource
 	definition.Object = obj
 	definition, err = normalizeResourceSchema(resource, definition)
 	if err != nil {
 		return err
+	}
+	key := resourceType(obj)
+	dynamic := false
+	if _, ok := obj.(*Unstructured); ok {
+		dynamic = true
 	}
 
 	s.mu.Lock()
@@ -92,8 +108,73 @@ func (s *Schema) Register(obj Object, definition ResourceSchema) error {
 	if _, exists := s.resources[resource]; exists {
 		return fmt.Errorf("resource %q already registered", resource)
 	}
+	if !dynamic {
+		if existing, exists := s.types[key]; exists {
+			return fmt.Errorf("type %v already registered as %q", key, existing)
+		}
+		s.types[key] = resource
+	}
 	s.resources[resource] = definition
 	return nil
+}
+
+// ResourceName resolves the registered resource name for obj. Unstructured
+// objects and object lists use their own resource field. Types that are not
+// registered fall back to the default name derived from their Go type.
+func (s *Schema) ResourceName(obj any) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("schema is nil")
+	}
+	switch value := obj.(type) {
+	case *Unstructured:
+		if resource := value.GetResource(); resource != "" {
+			return resource, nil
+		}
+		return "", fmt.Errorf("cannot get resource name from Unstructured object")
+	case ObjectList:
+		if resource := value.GetResource(); resource != "" {
+			return resource, nil
+		}
+		itemsPointer, err := GetItemsPtr(value)
+		if err != nil {
+			return "", err
+		}
+		key := reflect.TypeOf(itemsPointer).
+			Elem().
+			Elem()
+		for key.Kind() == reflect.Pointer {
+			key = key.Elem()
+		}
+		s.mu.RLock()
+		resource, exists := s.types[key]
+		s.mu.RUnlock()
+		if !exists {
+			return ReflectResourceName(key)
+		}
+		return resource, nil
+	}
+	key := resourceType(obj)
+	if key == nil {
+		return "", fmt.Errorf("object is nil")
+	}
+	s.mu.RLock()
+	resource, exists := s.types[key]
+	s.mu.RUnlock()
+	if !exists {
+		return ReflectResourceName(key)
+	}
+	return resource, nil
+}
+
+func resourceType(obj any) reflect.Type {
+	t := reflect.TypeOf(obj)
+	if t == nil {
+		return nil
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
 }
 
 func (s *Schema) Resource(resource string) (ResourceSchema, error) {
@@ -150,6 +231,9 @@ func (s *Schema) Snapshot() *Schema {
 	for resource, definition := range s.resources {
 		clone.resources[resource] = cloneResourceSchema(definition)
 	}
+	for key, resource := range s.types {
+		clone.types[key] = resource
+	}
 	return clone
 
 }
@@ -163,17 +247,10 @@ func (s *Schema) Clone() (*Schema, error) {
 }
 
 func normalizeResourceSchema(resource string, definition ResourceSchema) (ResourceSchema, error) {
-	definition.GenerationFields = slices.Clone(definition.GenerationFields)
-	seenGeneration := map[string]bool{}
-	for _, field := range definition.GenerationFields {
-		head, _, _ := strings.Cut(field, ".")
-		if !fieldPathPattern.MatchString(field) || head == "status" || slices.Contains(objectMetaFields, head) || seenGeneration[field] {
-			return ResourceSchema{}, fmt.Errorf("resource %q has invalid Generation field %q", resource, field)
-		}
-		seenGeneration[field] = true
+	if definition.StatusResource {
 		if _, dynamic := definition.Object.(*Unstructured); !dynamic {
-			if !hasSchemaField(reflect.TypeOf(definition.Object), strings.Split(field, ".")) {
-				return ResourceSchema{}, fmt.Errorf("resource %q tracks unknown field %q", resource, field)
+			if !hasSchemaField(reflect.TypeOf(definition.Object), []string{"status"}) {
+				return ResourceSchema{}, fmt.Errorf("resource %q declares status but has no status field", resource)
 			}
 		}
 	}
@@ -313,11 +390,12 @@ func hasSchemaField(t reflect.Type, path []string) bool {
 
 func cloneResourceSchema(definition ResourceSchema) ResourceSchema {
 	clone := ResourceSchema{
-		GenerationFields: slices.Clone(definition.GenerationFields),
-		Object:           definition.Object,
-		ScopeKeys:        append([]string(nil), definition.ScopeKeys...),
-		FieldSpecs:       append([]FieldSpec(nil), definition.FieldSpecs...),
-		Indexes:          make([]Index, len(definition.Indexes)),
+		Object:         definition.Object,
+		ResourceName:   definition.ResourceName,
+		StatusResource: definition.StatusResource,
+		ScopeKeys:      append([]string(nil), definition.ScopeKeys...),
+		FieldSpecs:     append([]FieldSpec(nil), definition.FieldSpecs...),
+		Indexes:        make([]Index, len(definition.Indexes)),
 	}
 	for i, index := range definition.Indexes {
 		clone.Indexes[i] = index

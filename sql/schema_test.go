@@ -4,20 +4,9 @@ import (
 	"reflect"
 	"testing"
 
-	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/common/meta"
 	"xiaoshiai.cn/store"
 )
-
-func TestPlanTableRejectsComplexGenerationTracking(t *testing.T) {
-	storage := &Storage{core: &core{codec: NewModelCodec()}}
-	for _, field := range []string{"extra", "link.href"} {
-		_, err := storage.planTable("planobjects", store.ResourceSchema{Object: &planObject{}, GenerationFields: []string{field}})
-		if !errors.IsUnsupported(err) {
-			t.Fatalf("tracking %s = %v, want Unsupported", field, err)
-		}
-	}
-}
 
 type planLink struct {
 	Href string `json:"href"`
@@ -30,8 +19,6 @@ type planObject struct {
 	Moment           meta.Time         `json:"moment"`
 	Link             *planLink         `json:"link,omitempty"`
 }
-
-func (*planObject) ResourceName() string { return "planobjects" }
 
 func TestPlanTableDerivesColumns(t *testing.T) {
 	definition := store.ResourceSchema{
