@@ -30,5 +30,8 @@ requirements, err := selector.ParseRequirements("visibility=public || owner=alic
 expression := requirements.String()
 ```
 
+用 map 构造等值条件时使用 `RequirementsFromMap`；它按字段名升序生成条件，同一映射总是
+得到相同的条件序列，便于稳定序列化和分页绑定。
+
 Store、backend 和协议 adapter 必须保留完整的布尔结构；无法无损执行的合法操作符应由
 调用模块按自己的错误契约拒绝，不能忽略或弱化条件。

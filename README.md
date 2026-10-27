@@ -2,7 +2,9 @@
 
 `store` 为业务模块提供统一的对象存储接口、资源定义、作用域、查询选项和并发控制语义。业务模块应依赖 `store.Store`，并由组合根选择具体存储实现。
 
-本文档面向 Store 调用方。直接 Store 实现必须遵守的完整行为、并发、删除、查询和 Watch 契约见 [DESIGN.md](./DESIGN.md)。
+本文档面向 Store 调用方。直接 Store 实现必须遵守的完整行为、并发、删除、查询和 Watch 契约见 [DESIGN.md](./DESIGN.md)。各 backend 与子包的构造方式、支持范围及实现契约见
+[SQL](./sql/README.md)、[MongoDB](./mongo/DESIGN.md)、[REST](./rest/README.md)、
+[selector](./selector/README.md) 和 [task](./task/README.md)。
 
 ## 作用域与调用位置
 
@@ -22,15 +24,13 @@ if err := storage.List(ctx, list, options...); err != nil {
 }
 ```
 
-Scope 是有序层级。普通读写只作用于完整的当前 Scope；只有需要读取后代 Scope，并且具体实现声明支持该能力时，才使用 `IncludeSubScopes`。
+Scope 是有序层级。普通读写只作用于完整的当前 Scope；只有需要读取后代 Scope，并且具体实现声明支持该能力时，才使用 `WithSubScopes()`。
 
-ID 创建后不可修改。SQL 要求同一种资源的 ID 在所有 Scope 中唯一，不同 Scope 重复创建
-同一 ID 也返回 AlreadyExists；其他 backend 可以允许跨 Scope 复用 ID。唯一范围不改变
-Scope 隔离。SQL 已有表须具有 `PRIMARY KEY(id)`，不满足时构造失败，需要显式迁移。
+ID 的唯一范围由 backend 声明：可以要求同一资源内跨所有 Scope 唯一，也可以允许不同
+Scope 复用 ID；违反唯一范围返回 AlreadyExists。更严格的唯一性不改变 Scope 隔离。
 
-资源名在 `ResourceSchema.ResourceName` 中声明；为空时按对象类型名推导默认复数名称。
-`Unstructured` 和 `ObjectList` 使用自身的 `resource` 字段。Store 实现通过 Schema 解析
-资源名，不再依赖对象上的 `ResourceName()` 方法。
+资源名在 `ResourceSchema.ResourceName` 中声明，为空时按对象类型名推导；`Unstructured`
+和 `ObjectList` 使用自身的 resource 字段。
 
 ## 更新与并发
 
@@ -48,8 +48,6 @@ Update、Patch、Status 写入和 Delete 不保证刷新输入对象。需要最
 单对象写入目标不存在时返回 NotFound；对象存在但版本、UID 或 selector 条件不匹配时返回 Conflict。
 
 Generation 的递增规则由各 backend 自行定义；对象元数据和 status 的变化不推进 Generation。
-SQL 的 Merge Patch 支持标量、整数组替换、一层 JSON 对象合并与键删除；
-嵌套对象合并及 JSON Patch 返回 Unsupported，不自动转为整对象读改写。
 
 只修改少数字段时优先使用原子 `Patch`，精确身份及版本条件通过 `WithPreconditions` 提交。只有操作具有完整替换语义，或者新值依赖刚读取的完整对象版本时才使用 `Update`；后一种情况应保留版本，使并发变化返回 Conflict，而不是覆盖其他写入。
 
@@ -63,9 +61,9 @@ err := storage.Patch(ctx, account, store.FieldPatch{Operations: []store.FieldOpe
 ))
 ```
 
-`FieldPatch` 的操作按数组顺序应用；`Path` 是点分隔的 JSON 字段路径（如
-`balance`、`nested.count`）。是否支持某个路径由具体 backend 决定，不支持时
-应拒绝整个 patch 而不是产生部分效果。
+`FieldPatch` 的操作按数组顺序应用；`Path` 是点分隔的字段路径（如 `balance`、
+`nested.count`）。字段补丁是可选能力，是否支持某个路径由具体 backend 决定；不支持时
+必须拒绝整个 patch，不能产生部分效果。
 
 ## 查询与错误
 
@@ -94,7 +92,9 @@ backend 无法执行时返回 Unsupported；调用方不能因此忽略条件或
 
 保留 Store 返回的领域错误语义，例如 NotFound、AlreadyExists、Conflict、Unsupported 和 ResourceExpired。调用方可以在业务接口处映射这些错误，但不应把并发冲突或不支持的操作降级为成功。
 
-`store/etcdcache` 的 `List` 和 `Count` 会等待对应资源的 watch cache 完成首次同步或重建。等待由调用操作的 Context 控制；cache 未能在 deadline 前恢复时返回 Context 错误。调用方应为请求设置合适的 deadline，不需要针对 `storage is (re)initializing` 设置固定次数重试。
+`store/etcdcache` 的 `List` 和 `Count` 会等待对应资源完成首次同步或重建。等待由操作的
+Context 控制，cache 未能在 deadline 前恢复时返回 Context 错误；调用方应为请求设置合适的
+deadline，不要用固定次数重试代替。
 
 ## 删除与 TTL
 
@@ -103,10 +103,9 @@ backend 无法执行时返回 Unsupported；调用方不能因此忽略条件或
 读取。终止后只能移除 finalizer，不能新增；Update 或 Patch 移除最后一个时原子完成物理
 删除。重复 Delete 不改变已有删除时间，也不追加新的传播标记。
 
-DeleteBatch 与 PatchBatch 中每个对象遵守相同规则，批量操作失败时可能已有部分对象生效。
-SQL 的批量写入使用集合语句；允许无 selector 的批量清空 finalizer，不支持批量设置非空 finalizer。
-DeleteBatch 不支持以 resourceVersion 或 deletionTimestamp 筛选。
-MongoDB 的批量写入也遵守生命周期。普通批量调用不承诺跨后端统一的整体原子性。
+DeleteBatch 与 PatchBatch 按 requirements 选择对象，每个对象遵守相同的单对象规则。
+批量操作不承诺整体原子性，返回错误时可能已有对象生效。具体 backend 对批量请求的筛选
+和 finalizer 组合可能有额外限制，不支持的组合在副作用前返回 Unsupported。
 
 TTL 与 finalizer 不能共存。原生 etcd 支持 Create 和普通 Update 设置 TTL，未指定 TTL 的
 后续写入保留已有过期安排；Status 写入不能设置 TTL。etcdcache 只支持 Create 设置 TTL，
@@ -132,25 +131,14 @@ visible := selector.Requirement{
 err := storage.List(ctx, list, store.WithFieldRequirements(visible))
 ```
 
-`None` 匹配零个对象，`All` 匹配全部对象；零值 Requirement 等同于
-`None`。空的顶层 `Requirements` 表示调用方没有增加选择条件，因此匹配全部对象。
-组合条件和普通叶子条件一样，必须在排序、分页和 Count 前执行。
+`None` 匹配零个对象，`All` 匹配全部对象；零值 Requirement 等同于 `None`。空的顶层
+`Requirements` 表示调用方没有增加选择条件。组合条件和普通叶子条件一样，必须在排序、
+分页和 Count 前执行。
 
-Label 和 Field Requirement 是两个分别求值、最后用 AND 连接的表达式；一个
-组合节点不能同时引用 label 和 field。有效但具体 adapter 无法无损执行的条件返回
-Unsupported；无效节点返回 BadRequest。
-
-`Requirements.String()` 和 `ParseRequirements` 使用同一套 selector 风格文本：
-
-```go
-expression := requirements.String()
-requirements, err = selector.ParseRequirements(expression)
-```
-
-平铺表达式沿用 Kubernetes label selector 的写法；递归表达式增加 `&&`、`||`、
-`!(...)`、`all()` 和 `none()`。包含分隔符的字符串自动加引号。协议 operand 按
-selector 语义解析成字符串，由 Requirement 求值层完成布尔值、数值和时间比较；
-`null` 单独表示 nil。Requirement 值支持 nil、字符串、布尔值、整数、有限浮点数和时间。
+Label 和 Field Requirement 是两个分别求值、最后用 AND 连接的表达式；一个组合节点不能
+同时引用 label 和 field。无效节点返回 BadRequest；有效但具体 adapter 无法无损执行的条件
+返回 Unsupported。条件的结构、规范文本与求值语义由 selector 拥有，完整说明见
+[selector 使用指南](./selector/README.md)。
 
 ## 序号分配
 
@@ -186,7 +174,3 @@ MongoDB 消费需要 replica set 或 sharded cluster 提供 change stream。通�
 轮询负责延迟消息和补漏；积压消息连续领取，不在每条消息间等待。连接的超时配置也适用于
 退出时的确认或释放操作。进程崩溃或数据库确认失败可能留下处理中消息，Queue 不自动回收；
 需要执行租约和自动重试时使用 task。
-
-## MongoDB 事务与编码
-
-`mongo.NewMongoStorage` 默认使用 MongoDB 的 BSON 编码；`mongo.WithBSONRegistry` 可为单个实例提供值类型编码器。调用方通过 `Close(ctx)` 释放连接。事务使用 snapshot 读取与 majority 提交，支持默认、ReadCommitted 和 RepeatableRead 请求；Serializable 返回 Unsupported。数据库瞬态事务冲突及未知提交结果由 MongoDB 驱动的 WithTransaction 协议处理。

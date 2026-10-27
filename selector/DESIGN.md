@@ -29,8 +29,6 @@ Key 或 Values，叶子节点不能携带子 Requirements。
 可以与对应的文本表示比较。缺失键只满足 `DoesNotExist`、非空 `NotEquals` 和非空
 `NotIn`。
 
-`RequirementsFromMap` 按字段名升序生成等值条件。同一映射产生相同的条件序列，供调用方稳定序列化及绑定分页查询。
-
 ## 文本与 adapter
 
 `Requirements.String` 生成 `ParseRequirements` 可解析的规范文本。顶层逗号表示

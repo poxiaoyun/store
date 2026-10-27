@@ -23,7 +23,9 @@
 SQL 支持受限的 Scope 路径：只有声明的 Scope 列能够与完整有序路径一一对应时，才能用
 这些列定位对象。路径的顺序、深度和每一级名称必须参与验证与匹配；重复资源类型、列名
 碰撞或其他无法无损表示的路径返回 Unsupported。完整 scopes 值保存于对象中，派生列
-不能覆盖或替代这份信息。根 Scope 的普通查询精确匹配根对象。根上的 List、Count 显式提供 WithSubScopes 时查询整个资源集合，继续应用筛选、排序与分页合同；带 Scope 前缀的后代查询返回 Unsupported。
+不能覆盖或替代这份信息。根 Scope 的普通查询精确匹配根对象；显式使用
+`WithSubScopes` 的 List 和 Count 查询整个资源集合，继续应用筛选、排序与分页合同。
+带 Scope 前缀的后代查询返回 Unsupported。
 
 每种资源始终以 id 为主键，在所有 Scope 中唯一；创建后 id 与 Scope 均不可修改。
 不同 Scope 创建相同 id 返回 AlreadyExists。ScopeKeys 用于 Scope 映射和查询索引，
@@ -33,7 +35,8 @@ SQL 支持受限的 Scope 路径：只有声明的 Scope 列能够与完整有�
 
 时间字段落为 `timestamptz` 或 `datetime(6)`；项目拥有的元数据时间类型在编解码层与
 `time.Time` 转换，不按普通结构体落 JSON。map、slice、struct 落为 `jsonb` 或 `json`。
-二进制 []byte 使用 bytea 或 blob，创建、读取、更新和 JSON Merge Patch 保持原字节；JSON 传输按 Go 的 base64 表示解码。
+二进制 `[]byte` 使用 bytea 或 blob，创建、读取、更新和 JSON Merge Patch 保持原字节；
+JSON 传输按 Go 的 base64 表示解码。
 字符串默认使用 text；被物理索引且需要有界键的字符串默认使用 varchar(255)，可通过
 ResourceSchema.FieldSpecs 的 Size 声明大小。
 
@@ -106,7 +109,8 @@ PatchBatch 的列赋值不能直接覆盖服务端元数据或 status，但 Stor
 
 `Transaction` 用 BeginTx 打开事务，回调收到绑定该事务的 Store；所有参与事务的操作
 都必须通过它执行。嵌套 Transaction 返回 Unsupported。默认隔离级别采用后端默认值，
-显式 WithIsolationLevel 无法执行时返回 Unsupported。上下文取消导致驱动自动回滚时，返回相应的 Context 错误；业务回调失败保留原错误。
+显式 WithIsolationLevel 无法执行时返回 Unsupported。上下文取消导致驱动自动回滚时，
+返回相应的 Context 错误；业务回调失败保留原错误。
 
 死锁与序列化失败按 WithMaxRetries 重试，默认 3 次，退避上限 100ms；重新执行回调前
 必须结束并回滚失败事务。回调须允许重复执行，不能假设事务内的外部副作用会随数据库回滚。

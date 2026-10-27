@@ -153,7 +153,16 @@ if err := manager.Retry(ctx, id, time.Time{}); err != nil {
 }
 ```
 
-`Manager.List` 使用 common 的 `meta.ListOptions`，但不同实现能够支持的搜索、排序和选择能力可能不同。内存和 MongoDB 实现支持 page 分页和 `LabelSelector`；`Size>0` 选择 page，`Page<1` 按第一页处理，否则不分页。它们不支持 continuation，因此 `Limit>0` 返回 `ErrInvalidArgument`；未选择 continuation 时忽略 `Continue`。`FieldSelector` 支持 `id`、`type`、`idempotencyKey`、`status.state`、`status.attempt`、`status.notBefore` 和 `creationTimestamp`；`Sort` 支持其中除 `idempotencyKey` 外的字段，并可以使用 `time` 作为 `creationTimestamp` 的别名。两种实现都不支持非空 `Search`。
+`Manager.List` 使用 common 的 `meta.ListOptions`，不同实现支持的搜索、排序和选择能力
+可能不同。内存和 MongoDB 实现的行为如下：
+
+- 分页：`Size>0` 选择 page，`Page<1` 按第一页处理，否则不分页。不支持 continuation，
+  因此 `Limit>0` 返回 `ErrInvalidArgument`；未选择 continuation 时忽略 `Continue`。
+- `FieldSelector`：支持 `id`、`type`、`idempotencyKey`、`status.state`、`status.attempt`、
+  `status.notBefore` 和 `creationTimestamp`。
+- `Sort`：支持上述字段（`idempotencyKey` 除外），并可以使用 `time` 作为
+  `creationTimestamp` 的别名。
+- `Search`：不支持非空值。
 
 `Manager.Cancel` 只接受 `Pending` 任务。成功返回表示任务已经进入 `Canceled`，不会再开始新的 Handler 执行尝试；`Running`、`Succeeded` 和 `Dead` 任务返回 `ErrInvalidState`。`Manager.Retry` 可以把 `Dead` 或 `Canceled` 任务重新变为 `Pending`，传入零值时间表示立即重试。
 
