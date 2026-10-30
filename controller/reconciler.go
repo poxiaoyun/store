@@ -70,9 +70,8 @@ func (r *BetterReconciler[T]) Reconcile(ctx context.Context, key ScopedKey) (Res
 	log.Info("start reconcile")
 	defer log.Info("finish reconcile")
 
-	obj, _ := reflect.New(reflect.TypeOf(*new(T)).
-		Elem()).
-		Interface().(T)
+	obj, _ := reflect.TypeAssert[T](reflect.New(reflect.TypeFor[T]().
+		Elem()))
 
 	condStorage := r.Client.Scope(key.Scopes()...)
 	if err := condStorage.Get(ctx, key.ID, obj); err != nil {

@@ -4,7 +4,7 @@
 
 本文档面向 Store 调用方。直接 Store 实现必须遵守的完整行为、并发、删除、查询和 Watch 契约见 [DESIGN.md](./DESIGN.md)。各 backend 与子包的构造方式、支持范围及实现契约见
 [SQL](./sql/README.md)、[MongoDB](./mongo/DESIGN.md)、[REST](./rest/README.md)、
-[selector](./selector/README.md) 和 [task](./task/README.md)。
+[selector](./selector/README.md)、[controller](./controller/README.md) 和 [task](./task/README.md)。
 
 ## 作用域与调用位置
 

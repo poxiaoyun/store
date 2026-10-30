@@ -127,17 +127,34 @@ type Result struct {
 	RequeueAfter time.Duration
 }
 
+// ControllerOptions controls worker concurrency, leadership and scheduling.
 type ControllerOptions[T comparable] struct {
-	Concurrent     int
+	// Concurrent bounds active workers; values below one use one worker.
+	Concurrent int
+	// LeaderElection optionally restricts execution to the current leader.
 	LeaderElection lease.LeaderElection
-	RateLimiter    workqueue.TypedRateLimiter[T]
+	// RateLimiter computes failed-item retry delays; nil uses the default policy.
+	RateLimiter workqueue.TypedRateLimiter[T]
+	// RateLimit optionally limits reconciliation attempts across all workers.
+	// Nil allows ready work to run as soon as a worker is available.
+	RateLimit *rate.Limiter
 }
 
+// ControllerOption configures a newly constructed controller.
 type ControllerOption[T comparable] func(*ControllerOptions[T])
 
+// WithConcurrent sets the worker count; values below one use one worker.
 func WithConcurrent[T comparable](concurrent int) ControllerOption[T] {
 	return func(o *ControllerOptions[T]) {
 		o.Concurrent = concurrent
+	}
+}
+
+// WithRateLimit installs a token bucket with the given attempts per second and
+// burst capacity. Each controller initialized with this option gets its own bucket.
+func WithRateLimit[T comparable](qps rate.Limit, burst int) ControllerOption[T] {
+	return func(o *ControllerOptions[T]) {
+		o.RateLimit = rate.NewLimiter(qps, burst)
 	}
 }
 
@@ -151,6 +168,7 @@ func NewController(name string, sync TypedReconciler[ScopedKey], options ...Cont
 	return NewTypedController(name, sync, options...)
 }
 
+// NewTypedController constructs a keyed controller with one worker and no rate cap by default.
 func NewTypedController[T comparable](name string, sync TypedReconciler[T], options ...ControllerOption[T]) *TypedController[T] {
 	opts := ControllerOptions[T]{}
 	for _, opt := range options {
@@ -165,10 +183,6 @@ func NewTypedController[T comparable](name string, sync TypedReconciler[T], opti
 		options:  opts,
 		queue:    NewDefaultTypedQueue(name, opts.RateLimiter),
 		syncFunc: sync,
-		ratelimiter: workqueue.NewTypedRateLimitingQueueWithConfig(
-			workqueue.DefaultTypedControllerRateLimiter[T](),
-			workqueue.TypedRateLimitingQueueConfig[T]{Name: name + "-rate-limiter"},
-		),
 	}
 	return c
 }
@@ -179,9 +193,6 @@ type TypedController[T comparable] struct {
 	sources  []Source[T]
 	queue    TypedQueue[T]
 	syncFunc TypedReconciler[T]
-
-	// ratelimiter is a global ratelimiter for the controller
-	ratelimiter workqueue.TypedRateLimitingInterface[T]
 }
 
 func (h *TypedController[T]) Watch(source ...Source[T]) *TypedController[T] {
@@ -218,18 +229,28 @@ func (h *TypedController[T]) run(ctx context.Context) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	// watch sources
 	for _, source := range h.sources {
-		source := source
 		eg.Go(func() error {
 			return source.Run(ctx, h.queue)
 		})
 	}
 	// run queue consumer
 	eg.Go(func() error {
-		return RunQueueConsumer(ctx, h.queue, h.syncFunc.Reconcile, h.options.Concurrent)
+		return RunQueueConsumer(ctx, h.queue, h.reconcile, h.options.Concurrent)
 	})
 	return eg.Wait()
 }
 
+func (h *TypedController[T]) reconcile(ctx context.Context, key T) (Result, error) {
+	if h.options.RateLimit != nil {
+		if err := h.options.RateLimit.Wait(ctx); err != nil {
+			return Result{}, err
+		}
+	}
+	return h.syncFunc.Reconcile(ctx, key)
+}
+
+// RunQueueConsumer processes ready keys with bounded concurrency and no rate cap.
+// Result and error handling determine whether a key is forgotten or requeued.
 func RunQueueConsumer[T comparable](ctx context.Context, queue TypedQueue[T], syncfunc func(ctx context.Context, key T) (Result, error), concurrent int) error {
 	go func() {
 		<-ctx.Done()
@@ -237,9 +258,6 @@ func RunQueueConsumer[T comparable](ctx context.Context, queue TypedQueue[T], sy
 	}()
 
 	log := log.FromContext(ctx)
-
-	// 10 qps, burst 100
-	ratelimit := rate.NewLimiter(rate.Limit(10), 100)
 
 	// get item from queue and process
 	wg := sync.WaitGroup{}
@@ -257,9 +275,6 @@ func RunQueueConsumer[T comparable](ctx context.Context, queue TypedQueue[T], sy
 						queue.Done(val)
 						return
 					}
-					// ratelimit 1
-					ratelimit.Wait(ctx)
-
 					result, err := syncfunc(ctx, val)
 					if err != nil {
 						log.Error(err, "sync", "key", val)
