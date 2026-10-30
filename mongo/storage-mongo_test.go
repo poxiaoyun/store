@@ -2,10 +2,12 @@ package mongo
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +42,29 @@ type fieldPatchObject struct {
 	Note             string            `json:"note,omitempty"`
 	Nested           *fieldPatchNested `json:"nested,omitempty"`
 	Status           fieldPatchStatus  `json:"status"`
+	At               meta.Time         `json:"at,omitempty"`
+	Amount           fieldPatchAmount  `json:"amount,omitempty"`
+}
+
+// fieldPatchAmount marshals as a decimal string, like an exact amount. Storage
+// must keep it numeric even when a patch supplies the typed value.
+type fieldPatchAmount int64
+
+func (a fieldPatchAmount) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strconv.FormatInt(int64(a), 10))
+}
+
+func (a *fieldPatchAmount) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return err
+	}
+	*a = fieldPatchAmount(value)
+	return nil
 }
 
 type fieldPatchNested struct {
@@ -357,47 +382,47 @@ func TestMongoStorageIntegration(t *testing.T) {
 	}{
 		{
 			name:        "equals literal dotted key",
-			requirement: selector.NewRequirement("example.com/team", selector.Equals, "platform"),
+			requirement: selector.RequirementEqual("example.com/team", "platform"),
 			want:        []string{"platform"},
 		},
 		{
 			name:        "not equals includes missing key",
-			requirement: selector.NewRequirement("example.com/team", selector.NotEquals, "platform"),
+			requirement: selector.RequirementNotEqual("example.com/team", "platform"),
 			want:        []string{"infrastructure", "unlabeled"},
 		},
 		{
 			name:        "in",
-			requirement: selector.NewRequirement("example.com/team", selector.In, "platform"),
+			requirement: selector.RequirementIn("example.com/team", "platform"),
 			want:        []string{"platform"},
 		},
 		{
 			name:        "not in includes missing key",
-			requirement: selector.NewRequirement("example.com/team", selector.NotIn, "platform"),
+			requirement: selector.RequirementNotIn("example.com/team", "platform"),
 			want:        []string{"infrastructure", "unlabeled"},
 		},
 		{
 			name:        "empty in matches nothing",
-			requirement: selector.NewRequirement("example.com/team", selector.In),
+			requirement: selector.RequirementIn("example.com/team"),
 			want:        []string{},
 		},
 		{
 			name:        "empty not in matches nothing",
-			requirement: selector.NewRequirement("example.com/team", selector.NotIn),
+			requirement: selector.RequirementNotIn("example.com/team"),
 			want:        []string{},
 		},
 		{
 			name:        "exists",
-			requirement: selector.NewRequirement("example.com/team", selector.Exists),
+			requirement: selector.RequirementExists("example.com/team"),
 			want:        []string{"infrastructure", "platform"},
 		},
 		{
 			name:        "does not exist",
-			requirement: selector.NewRequirement("example.com/team", selector.DoesNotExist),
+			requirement: selector.RequirementDoesNotExist("example.com/team"),
 			want:        []string{"unlabeled"},
 		},
 		{
 			name:        "equals literal dollar key",
-			requirement: selector.NewRequirement("$owner", selector.Equals, "alice"),
+			requirement: selector.RequirementEqual("$owner", "alice"),
 			want:        []string{"platform"},
 		},
 	}
@@ -481,7 +506,7 @@ func TestMongoStorageBatchPatchAdvancesResourceVersion(t *testing.T) {
 		t.Context(),
 		list,
 		store.RawPatchBatch(store.PatchTypeMergePatch, []byte(`{"description":"patched"}`)),
-		store.WithFieldRequirements(selector.NewRequirement("id", selector.Equals, object.ID)),
+		store.WithFieldRequirements(selector.RequirementEqual("id", object.ID)),
 	); err != nil {
 		t.Fatalf("PatchBatch() error = %v", err)
 	}
@@ -560,7 +585,7 @@ func TestSelectorMatchUsesLiteralLabelKeys(t *testing.T) {
 	}{
 		{
 			name:        "equals",
-			requirement: selector.NewRequirement("example.com/team", selector.Equals, "platform"),
+			requirement: selector.RequirementEqual("example.com/team", "platform"),
 			want:        labelExpression("$labels", "example.com/team", "$eq", "platform"),
 		},
 		{
@@ -570,37 +595,37 @@ func TestSelectorMatchUsesLiteralLabelKeys(t *testing.T) {
 		},
 		{
 			name:        "not equals",
-			requirement: selector.NewRequirement("example.com/team", selector.NotEquals, "platform"),
+			requirement: selector.RequirementNotEqual("example.com/team", "platform"),
 			want:        labelExpression("$labels", "example.com/team", "$ne", "platform"),
 		},
 		{
 			name:        "in",
-			requirement: selector.NewRequirement("example.com/team", selector.In, "platform", "infrastructure"),
+			requirement: selector.RequirementIn("example.com/team", "platform", "infrastructure"),
 			want:        labelInExpression("$labels", "example.com/team", false, "platform", "infrastructure"),
 		},
 		{
 			name:        "not in",
-			requirement: selector.NewRequirement("example.com/team", selector.NotIn, "platform", "infrastructure"),
+			requirement: selector.RequirementNotIn("example.com/team", "platform", "infrastructure"),
 			want:        labelInExpression("$labels", "example.com/team", true, "platform", "infrastructure"),
 		},
 		{
 			name:        "exists",
-			requirement: selector.NewRequirement("example.com/team", selector.Exists),
+			requirement: selector.RequirementExists("example.com/team"),
 			want:        labelExpression("$labels", "example.com/team", "$ne", nil),
 		},
 		{
 			name:        "does not exist",
-			requirement: selector.NewRequirement("example.com/team", selector.DoesNotExist),
+			requirement: selector.RequirementDoesNotExist("example.com/team"),
 			want:        labelExpression("$labels", "example.com/team", "$eq", nil),
 		},
 		{
 			name:        "dollar prefix",
-			requirement: selector.NewRequirement("$team", selector.Equals, "platform"),
+			requirement: selector.RequirementEqual("$team", "platform"),
 			want:        labelExpression("$labels", "$team", "$eq", "platform"),
 		},
 		{
 			name:        "ordinary key",
-			requirement: selector.NewRequirement("app", selector.Equals, "api"),
+			requirement: selector.RequirementEqual("app", "api"),
 			want:        labelExpression("$labels", "app", "$eq", "api"),
 		},
 	}

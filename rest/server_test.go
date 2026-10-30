@@ -128,7 +128,7 @@ func TestRemoteStoreListPassesCursor(t *testing.T) {
 	fieldRequirement := selector.RequirementEqual("enabled", "true")
 
 	if err := remote.List(context.Background(), list,
-		store.WithContinue("current-token", 2),
+		store.WithContinueLimit("current-token", 2),
 		store.WithLabelRequirements(labelRequirement),
 		store.WithFieldRequirements(fieldRequirement),
 		store.WithFields("id", "name"),
@@ -191,7 +191,7 @@ func TestRemoteStoreListPassesRecursiveRequirements(t *testing.T) {
 	fieldRequirement := selector.Requirement{
 		Operator: selector.And,
 		Requirements: store.Requirements{
-			selector.NewRequirement("rank", selector.GreaterThan, int64(1)),
+			selector.RequirementGreaterThan("rank", int64(1)),
 			{
 				Operator: selector.Not,
 				Requirements: store.Requirements{

@@ -26,17 +26,17 @@ func TestMatchUnstructuredFieldRequirements(t *testing.T) {
 		},
 		{
 			name: "fractional greater than",
-			req:  selector.NewRequirement("score", selector.GreaterThan, 1.0),
+			req:  selector.RequirementGreaterThan("score", 1.0),
 			want: true,
 		},
 		{
 			name: "greater than or equal",
-			req:  selector.NewRequirement("score", selector.GreaterThanOrEqual, 1.5),
+			req:  selector.RequirementGreaterThanOrEqual("score", 1.5),
 			want: true,
 		},
 		{
 			name: "less than or equal",
-			req:  selector.NewRequirement("score", selector.LessThanOrEqual, 1.5),
+			req:  selector.RequirementLessThanOrEqual("score", 1.5),
 			want: true,
 		},
 		{

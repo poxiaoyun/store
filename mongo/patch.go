@@ -37,6 +37,17 @@ type patchTest struct {
 // filter carries every condition, so the decision and the write are a single
 // document operation.
 func (m *MongoStorage) fieldPatch(ctx context.Context, obj store.Object, patch store.Patch, status bool, options store.PatchOptions) error {
+	// An in-process FieldPatch carries the caller's typed Go values. Applying
+	// them directly lets the BSON registry pick the storage representation;
+	// encoding the patch as JSON first would store dates and exact numbers as
+	// strings. Wire-originated field patches, which only have JSON values, are
+	// decoded and keep their JSON representation.
+	if operations, ok := typedFieldPatch(patch); ok {
+		if len(operations) == 0 {
+			return errors.NewBadRequest("field patch has no operations")
+		}
+		return m.applyPatchOperations(ctx, obj, operations, false, status, options)
+	}
 	data, err := patch.Data(obj)
 	if err != nil {
 		return err
@@ -46,6 +57,22 @@ func (m *MongoStorage) fieldPatch(ctx context.Context, obj store.Object, patch s
 		return err
 	}
 	return m.applyPatchOperations(ctx, obj, operations, false, status, options)
+}
+
+// typedFieldPatch returns the operations of an in-process field patch. Other
+// patch implementations only expose their wire encoding.
+func typedFieldPatch(patch store.Patch) ([]store.FieldOperation, bool) {
+	switch typed := patch.(type) {
+	case store.FieldPatch:
+		return typed.Operations, true
+	case *store.FieldPatch:
+		if typed == nil {
+			return nil, false
+		}
+		return typed.Operations, true
+	default:
+		return nil, false
+	}
 }
 
 // jsonPatch applies the supported subset of RFC 6902: object-field add,

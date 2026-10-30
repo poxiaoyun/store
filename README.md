@@ -32,6 +32,11 @@ Scope 复用 ID；违反唯一范围返回 AlreadyExists。更严格的唯一性
 资源名在 `ResourceSchema.ResourceName` 中声明，为空时按对象类型名推导；`Unstructured`
 和 `ObjectList` 使用自身的 resource 字段。
 
+资源索引默认包含 ScopeKeys。需要跨 Scope 保证外部业务身份唯一时，声明
+`Index{Fields: ..., Unique: true, Global: true}`；可选身份同时使用 Nullable。
+全局索引只定义约束范围，读写仍使用完整 Scope。
+
+
 ## 更新与并发
 
 普通的读取—修改—写入流程必须保留读取到的 `ResourceVersion`。调用 `Get` 后修改对象再执行 `Update`，或者 `CreateOrUpdate` 返回已有对象时，不要把 `ResourceVersion` 重置为零。
@@ -57,13 +62,16 @@ Generation 的递增规则由各 backend 自行定义；对象元数据和 statu
 err := storage.Patch(ctx, account, store.FieldPatch{Operations: []store.FieldOperation{
   {Op: store.FieldOpInc, Path: "balance", Value: int64(-30)},
 }}, store.WithFieldRequirements(
-  selector.NewRequirement("balance", selector.GreaterThanOrEqual, int64(30)),
+  selector.RequirementGreaterThanOrEqual("balance", int64(30)),
 ))
 ```
 
 `FieldPatch` 的操作按数组顺序应用；`Path` 是点分隔的字段路径（如 `balance`、
 `nested.count`）。字段补丁是可选能力，是否支持某个路径由具体 backend 决定；不支持时
 必须拒绝整个 patch，不能产生部分效果。
+
+进程内的 `FieldPatch` 直接携带调用方的 Go 值，backend 按字段声明类型编码，时间、金额等
+使用数据库原生类型；线协议的 `RawPatch` 只有 JSON 值，后端按其 JSON 表示写入。
 
 新值依赖存储中的其他字段时，用 `FieldOpExpr` 把计算交给 backend，同样不需要先读取：
 
@@ -85,7 +93,7 @@ err := storage.Patch(ctx, order, store.FieldPatch{Operations: []store.FieldOpera
 
 ## 查询与错误
 
-List 使用 `WithLimit`、`WithContinue` 和 `WithOffset`。正数 Limit 限制本批数量，
+List 使用 `WithLimit`、`WithContinueLimit` 和 `WithOffset`。正数 Limit 限制本批数量，
 零值不限制。Continue 是后端生成的不透明字符串；为空开始查询，响应为空表示遍历结束。
 Offset 仅指定首批跳过的对象数，不能与非空 Continue 同时使用。
 

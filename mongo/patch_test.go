@@ -5,10 +5,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	commonerrors "xiaoshiai.cn/common/errors"
+	"xiaoshiai.cn/common/meta"
 	testmongodb "xiaoshiai.cn/common/testkit/mongodb"
 	"xiaoshiai.cn/store"
 	"xiaoshiai.cn/store/selector"
@@ -43,7 +46,7 @@ func TestMongoFieldPatch(t *testing.T) {
 		{Op: store.FieldOpInc, Path: "nested.count", Value: json.Number("2")},
 	}}
 	if err := storage.Patch(t.Context(), object, patch, store.WithFieldRequirements(
-		selector.NewRequirement("balance", selector.GreaterThanOrEqual, int64(30)),
+		selector.RequirementGreaterThanOrEqual("balance", int64(30)),
 	)); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +66,7 @@ func TestMongoFieldPatch(t *testing.T) {
 	err := storage.Patch(t.Context(), object, store.FieldPatch{Operations: []store.FieldOperation{
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-100")},
 	}}, store.WithFieldRequirements(
-		selector.NewRequirement("balance", selector.GreaterThanOrEqual, int64(100)),
+		selector.RequirementGreaterThanOrEqual("balance", int64(100)),
 	))
 	if !commonerrors.IsConflict(err) {
 		t.Fatalf("insufficient balance: %v", err)
@@ -158,25 +161,24 @@ func TestMongoFieldPatchConcurrentDebits(t *testing.T) {
 	var rejected atomic.Int64
 	var wait sync.WaitGroup
 	for range attempts {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			err := storage.Patch(t.Context(), &fieldPatchObject{
 				ObjectMeta: store.ObjectMeta{ID: object.ID},
 			}, store.FieldPatch{Operations: []store.FieldOperation{
 				{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-1")},
 			}}, store.WithFieldRequirements(
-				selector.NewRequirement("balance", selector.GreaterThanOrEqual, int64(1)),
+				selector.RequirementGreaterThanOrEqual("balance", int64(1)),
 			))
-			switch {
-			case err == nil:
-				succeeded.Add(1)
-			case commonerrors.IsConflict(err):
-				rejected.Add(1)
-			default:
-				t.Errorf("unexpected concurrent patch error: %v", err)
+			if err != nil {
+				if commonerrors.IsConflict(err) {
+					rejected.Add(1)
+				} else {
+					t.Errorf("unexpected concurrent patch error: %v", err)
+				}
+				return
 			}
-		}()
+			succeeded.Add(1)
+		})
 	}
 	wait.Wait()
 	if succeeded.Load() != 100 || rejected.Load() != 100 {
@@ -385,5 +387,50 @@ func TestBuildFieldPatchUpdateExpression(t *testing.T) {
 	cond, ok := set[0].Value.(bson.D)
 	if !ok || len(cond) != 1 || cond[0].Key != "$cond" {
 		t.Fatalf("expression value: %#v", set[0].Value)
+	}
+}
+
+func TestMongoFieldPatchPreservesDeclaredTypes(t *testing.T) {
+	database := RequireIntegrationDatabase(t, testmongodb.RequireURI(t))
+	storage := newFieldPatchStorage(t, database)
+	at := meta.Time{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
+	object := &fieldPatchObject{
+		ObjectMeta: store.ObjectMeta{ID: "typed"},
+		At:         meta.Time{Time: at.Add(-time.Hour)},
+		Amount:     100,
+	}
+	if err := storage.Create(t.Context(), object); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Patch(t.Context(), object, store.FieldPatch{Operations: []store.FieldOperation{
+		{Op: store.FieldOpSet, Path: "at", Value: at},
+		{Op: store.FieldOpSet, Path: "amount", Value: fieldPatchAmount(250)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	resource, err := storage.core.schema.ResourceName(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw bson.M
+	if err := database.Collection(resource).
+		FindOne(t.Context(), bson.M{"id": object.ID}).
+		Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["at"].(primitive.DateTime); !ok {
+		t.Fatalf("time stored as %T", raw["at"])
+	}
+	if value, ok := raw["amount"].(int64); !ok || value != 250 {
+		t.Fatalf("amount stored as %T=%v", raw["amount"], raw["amount"])
+	}
+	values := &store.List[fieldPatchObject]{}
+	if err := storage.List(t.Context(), values, store.WithFieldRequirements(
+		selector.RequirementLessThanOrEqual("at", meta.Time{Time: at.Add(time.Minute)}),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if len(values.Items) != 1 || !values.Items[0].At.Time.Equal(at.Time) || values.Items[0].Amount != 250 {
+		t.Fatalf("native time range query: %+v", values.Items)
 	}
 }

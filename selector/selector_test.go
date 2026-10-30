@@ -16,7 +16,7 @@ func TestRequirementValidate(t *testing.T) {
 			{
 				Operator: selector.Not,
 				Requirements: selector.Requirements{
-					selector.NewRequirement("owner", selector.In, "blocked"),
+					selector.RequirementIn("owner", "blocked"),
 				},
 			},
 		},

@@ -252,7 +252,7 @@ func Run(t *testing.T, fixture Fixture) {
 				t.Context(),
 				&commonstore.List[Object]{Resource: "storetests"},
 				commonstore.WithSendInitialEvents(),
-				commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.GreaterThan, 7)),
+				commonstore.WithFieldRequirements(selector.RequirementGreaterThan("rank", 7)),
 			)
 		})
 		defer watcher.Stop()
@@ -341,7 +341,7 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 
 		greaterThanTwo := commonstore.WithFieldRequirements(
-			selector.NewRequirement("rank", selector.GreaterThan, 2),
+			selector.RequirementGreaterThan("rank", 2),
 		)
 		count, err := storage.Count(t.Context(), &Object{}, greaterThanTwo)
 		if err != nil {
@@ -1360,7 +1360,7 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.PatchBatch(
 			t.Context(), &commonstore.List[Object]{},
 			commonstore.MapMergePatchBacth{"rank": 5},
-			commonstore.WithFieldRequirements(selector.NewRequirement("value", selector.In, "b", "c")),
+			commonstore.WithFieldRequirements(selector.RequirementIn("value", "b", "c")),
 		); err != nil {
 			t.Fatalf("PatchBatch() error = %v", err)
 		}
@@ -1378,7 +1378,7 @@ func Run(t *testing.T, fixture Fixture) {
 		}
 		if err := storage.DeleteBatch(
 			t.Context(), &commonstore.List[Object]{},
-			commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.GreaterThan, 1)),
+			commonstore.WithFieldRequirements(selector.RequirementGreaterThan("rank", 1)),
 		); err != nil {
 			t.Fatalf("DeleteBatch() error = %v", err)
 		}
@@ -1958,7 +1958,7 @@ func RunQueries(t *testing.T, fixture Fixture, storage commonstore.Store) {
 			{
 				Operator: selector.And,
 				Requirements: commonstore.Requirements{
-					selector.NewRequirement("rank", selector.GreaterThan, 1),
+					selector.RequirementGreaterThan("rank", 1),
 					{
 						Operator: selector.Not,
 						Requirements: commonstore.Requirements{
@@ -1988,8 +1988,8 @@ func RunQueries(t *testing.T, fixture Fixture, storage commonstore.Store) {
 		{name: "composed field selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(fieldComposition)}, wantIDs: []string{"a", "c"}},
 		{name: "composed label selector", enabled: fixture.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(labelComposition)}, wantIDs: []string{"a", "c"}},
 		{name: "none selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.Requirement{})}, wantIDs: []string{}},
-		{name: "empty in selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.In))}, wantIDs: []string{}},
-		{name: "empty not-in selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.NewRequirement("rank", selector.NotIn))}, wantIDs: []string{}},
+		{name: "empty in selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.RequirementIn("rank"))}, wantIDs: []string{}},
+		{name: "empty not-in selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.RequirementNotIn("rank"))}, wantIDs: []string{}},
 		{name: "all selector", enabled: fixture.FieldSelector, options: []commonstore.ListOption{commonstore.WithFieldRequirements(selector.Requirement{Operator: selector.All})}, wantIDs: []string{"a", "b", "c"}},
 		{name: "special label keys", enabled: fixture.LabelSelector, options: []commonstore.ListOption{commonstore.WithLabelRequirements(selector.RequirementEqual("owner.name", "alice"), selector.RequirementEqual("$owner", "alice"))}, wantIDs: []string{"a"}},
 		{name: "search by name", enabled: fixture.Search, options: []commonstore.ListOption{commonstore.WithSearch("needle")}, wantIDs: []string{"a"}},
@@ -2079,7 +2079,7 @@ func RunQueries(t *testing.T, fixture Fixture, storage commonstore.Store) {
 		continueToken := ""
 		for {
 			list := &commonstore.List[Object]{Resource: "storetests"}
-			options := []commonstore.ListOption{commonstore.WithContinue(continueToken, 1)}
+			options := []commonstore.ListOption{commonstore.WithContinueLimit(continueToken, 1)}
 			if err := storage.List(t.Context(), list, options...); err != nil {
 				t.Fatalf("cursor List() error = %v", err)
 			}
@@ -2357,16 +2357,16 @@ func runMutationConditions(t *testing.T, fixture Fixture) {
 			t.Fatalf("first page = %#v", first)
 		}
 		for _, option := range []commonstore.ListOption{commonstore.WithOffset(1), commonstore.WithSort("id-")} {
-			if err := storage.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithContinue(first.Continue, 1), option); commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+			if err := storage.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithContinueLimit(first.Continue, 1), option); commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
 				t.Fatalf("changed query = %v, want BadRequest", err)
 			}
 		}
 		other := storage.Scope(commonstore.Scope{Resource: "tenants", Name: "other"})
-		if err := other.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithContinue(first.Continue, 1)); commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
+		if err := other.List(t.Context(), &commonstore.List[Object]{}, commonstore.WithContinueLimit(first.Continue, 1)); commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
 			t.Fatalf("changed scope = %v", err)
 		}
 		second := &commonstore.List[Object]{}
-		if err := storage.List(t.Context(), second, commonstore.WithContinue(first.Continue, 2)); err != nil {
+		if err := storage.List(t.Context(), second, commonstore.WithContinueLimit(first.Continue, 2)); err != nil {
 			t.Fatal(err)
 		}
 		if len(second.Items) != 2 || second.Items[0].ID == first.Items[0].ID || second.Continue != "" {

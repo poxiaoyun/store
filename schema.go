@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"regexp"
 	"slices"
@@ -16,12 +17,15 @@ var (
 )
 
 // Index describes a resource index. Fields are ordered and are normalized to
-// include the resource's scope keys when the resource is registered.
+// include the resource's scope keys unless Global is set.
 type Index struct {
 	Name     string
 	Fields   []string
 	Unique   bool
 	Nullable bool
+	// Global applies the declared fields across every scope of the resource.
+	// Object reads and writes still require their complete scope.
+	Global bool
 }
 
 // FieldSpec declares storage attributes of one model field beyond what the
@@ -231,9 +235,7 @@ func (s *Schema) Snapshot() *Schema {
 	for resource, definition := range s.resources {
 		clone.resources[resource] = cloneResourceSchema(definition)
 	}
-	for key, resource := range s.types {
-		clone.types[key] = resource
-	}
+	maps.Copy(clone.types, s.types)
 	return clone
 
 }
@@ -316,10 +318,12 @@ func normalizeResourceSchema(resource string, definition ResourceSchema) (Resour
 			seenFields[field] = struct{}{}
 			index.Fields[i] = field
 		}
-		for _, scopeKey := range definition.ScopeKeys {
-			if _, exists := seenFields[scopeKey]; !exists {
-				index.Fields = append(index.Fields, scopeKey)
-				seenFields[scopeKey] = struct{}{}
+		if !index.Global {
+			for _, scopeKey := range definition.ScopeKeys {
+				if _, exists := seenFields[scopeKey]; !exists {
+					index.Fields = append(index.Fields, scopeKey)
+					seenFields[scopeKey] = struct{}{}
+				}
 			}
 		}
 		if index.Name == "" {

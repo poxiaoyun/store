@@ -80,7 +80,7 @@ func TestListContinue(t *testing.T) {
 	for page := 0; ; page++ {
 		list := &store.List[TestObject]{}
 		if err := etcdStore.List(ctx, list,
-			store.WithContinue(continueToken, 3),
+			store.WithContinueLimit(continueToken, 3),
 		); err != nil {
 			t.Fatalf("failed to list page %d: %v", page, err)
 		}

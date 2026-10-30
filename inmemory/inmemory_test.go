@@ -436,3 +436,37 @@ func requireWatchEvent(t *testing.T, watcher store.Watcher, eventType store.Watc
 		t.Fatalf("timed out waiting for %q event", eventType)
 	}
 }
+
+func TestGlobalUniqueIndexPreservesScopeIsolation(t *testing.T) {
+	schema := store.NewSchema()
+	if err := schema.Register(&user{}, store.ResourceSchema{ScopeKeys: []string{"tenant"}, Indexes: []store.Index{
+		{Name: "receipt", Fields: []string{"email"}, Unique: true, Nullable: true, Global: true},
+		{Name: "local", Fields: []string{"phone"}, Unique: true, Nullable: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := New(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := storage.Scope(store.Scope{Resource: "tenants", Name: "a"})
+	second := storage.Scope(store.Scope{Resource: "tenants", Name: "b"})
+	accepted := &user{Email: "receipt-1", Phone: "same-local-value"}
+	if err := first.Create(t.Context(), accepted); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Create(t.Context(), &user{Email: "receipt-1"}); !commonerrors.IsAlreadyExists(err) {
+		t.Fatalf("global duplicate: %v", err)
+	}
+	if err := second.Get(t.Context(), accepted.ID, &user{}); !commonerrors.IsNotFound(err) {
+		t.Fatalf("scope isolation: %v", err)
+	}
+	if err := second.Create(t.Context(), &user{Email: "receipt-2", Phone: "same-local-value"}); err != nil {
+		t.Fatalf("local key reused across scopes: %v", err)
+	}
+	for range 2 {
+		if err := second.Create(t.Context(), &user{}); err != nil {
+			t.Fatalf("absent receipt identity: %v", err)
+		}
+	}
+}

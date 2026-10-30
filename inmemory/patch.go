@@ -142,7 +142,7 @@ func validFieldPath(path string) bool {
 	if path == "" {
 		return false
 	}
-	for _, segment := range strings.Split(path, ".") {
+	for segment := range strings.SplitSeq(path, ".") {
 		if segment == "" || strings.HasPrefix(segment, "$") {
 			return false
 		}

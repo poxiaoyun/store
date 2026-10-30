@@ -401,8 +401,8 @@ func WithLimit(limit int) ListLimitOption {
 	return ListLimitOption(limit)
 }
 
-// ContinueOption selects a cursor read and sets its batch bound.
-type ContinueOption struct {
+// ContinueLimitOption selects a cursor read and sets its batch bound.
+type ContinueLimitOption struct {
 	// Token is the opaque token returned by the previous batch; empty selects
 	// the first batch.
 	Token string
@@ -411,15 +411,15 @@ type ContinueOption struct {
 }
 
 // ApplyToList selects the cursor read and sets its bound together.
-func (option ContinueOption) ApplyToList(options *ListOptions) {
+func (option ContinueLimitOption) ApplyToList(options *ListOptions) {
 	options.Continue = option.Token
 	options.Limit = option.Limit
 }
 
-// WithContinue selects a cursor read of at most limit objects after token. An
+// WithContinueLimit selects a cursor read of at most limit objects after token. An
 // empty token selects the first batch. WithLimit also starts a resumable query.
-func WithContinue(token string, limit int) ContinueOption {
-	return ContinueOption{Token: token, Limit: limit}
+func WithContinueLimit(token string, limit int) ContinueLimitOption {
+	return ContinueLimitOption{Token: token, Limit: limit}
 }
 
 // SortOption sets the List sort expression.

@@ -42,12 +42,12 @@ func TestApplyListOptionsAcceptsPaginationForms(t *testing.T) {
 		},
 		{
 			name:    "first cursor batch",
-			options: []ListOption{WithContinue("", 25)},
+			options: []ListOption{WithContinueLimit("", 25)},
 			want:    ListOptions{Limit: 25, Continue: ""},
 		},
 		{
 			name:    "later cursor batch",
-			options: []ListOption{WithContinue("next", 25)},
+			options: []ListOption{WithContinueLimit("next", 25)},
 			want:    ListOptions{Limit: 25, Continue: "next"},
 		},
 	}

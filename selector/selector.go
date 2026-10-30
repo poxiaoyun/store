@@ -18,11 +18,54 @@ type Requirements []Requirement
 
 // RequirementEqual constructs one equality leaf requirement.
 func RequirementEqual(key string, value any) Requirement {
-	return Requirement{
-		Key:      key,
-		Operator: Equals,
-		Values:   []any{value},
-	}
+	return NewRequirement(key, Equals, value)
+}
+
+// RequirementNotEqual matches a missing key or a value unequal to value.
+func RequirementNotEqual(key string, value any) Requirement {
+	return NewRequirement(key, NotEquals, value)
+}
+
+// RequirementGreaterThan matches a present value greater than value.
+func RequirementGreaterThan(key string, value any) Requirement {
+	return NewRequirement(key, GreaterThan, value)
+}
+
+// RequirementGreaterThanOrEqual matches a present value greater than or equal to value.
+func RequirementGreaterThanOrEqual(key string, value any) Requirement {
+	return NewRequirement(key, GreaterThanOrEqual, value)
+}
+
+// RequirementLessThan matches a present value less than value.
+func RequirementLessThan(key string, value any) Requirement {
+	return NewRequirement(key, LessThan, value)
+}
+
+// RequirementLessThanOrEqual matches a present value less than or equal to value.
+func RequirementLessThanOrEqual(key string, value any) Requirement {
+	return NewRequirement(key, LessThanOrEqual, value)
+}
+
+// RequirementIn matches a present value equal to any supplied value.
+// No values matches nothing.
+func RequirementIn(key string, values ...any) Requirement {
+	return NewRequirement(key, In, values...)
+}
+
+// RequirementNotIn matches a missing key or a value unequal to all supplied values.
+// No values matches nothing.
+func RequirementNotIn(key string, values ...any) Requirement {
+	return NewRequirement(key, NotIn, values...)
+}
+
+// RequirementExists matches a present key, including an empty or nil value.
+func RequirementExists(key string) Requirement {
+	return NewRequirement(key, Exists)
+}
+
+// RequirementDoesNotExist matches an absent key.
+func RequirementDoesNotExist(key string) Requirement {
+	return NewRequirement(key, DoesNotExist)
 }
 
 // NewRequirement constructs one leaf requirement. Composite and constant

@@ -18,10 +18,10 @@ type Requirements = selector.Requirements
 func NewCreationRangeRequirement(start, end time.Time) Requirements {
 	result := make(Requirements, 0, 2)
 	if !start.IsZero() {
-		result = append(result, selector.NewRequirement("creationTimestamp", selector.GreaterThanOrEqual, start))
+		result = append(result, selector.RequirementGreaterThanOrEqual("creationTimestamp", start))
 	}
 	if !end.IsZero() {
-		result = append(result, selector.NewRequirement("creationTimestamp", selector.LessThanOrEqual, end))
+		result = append(result, selector.RequirementLessThanOrEqual("creationTimestamp", end))
 	}
 	return result
 }

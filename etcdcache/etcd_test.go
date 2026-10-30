@@ -240,11 +240,11 @@ func TestEtcdCacherStore(t *testing.T) {
 		assertListIDs(t, ctx, storage, []string{"root-blue", "root-red", "scope-blue", "scope-red"}, store.WithSubScopes())
 		assertListIDs(t, ctx, storage, []string{"scope-blue", "scope-red"},
 			store.WithSubScopes(),
-			store.WithFieldRequirements(selector.NewRequirement("organization", selector.Exists)),
+			store.WithFieldRequirements(selector.RequirementExists("organization")),
 		)
 		assertListIDs(t, ctx, storage, []string{"root-blue", "root-red"},
 			store.WithSubScopes(),
-			store.WithFieldRequirements(selector.NewRequirement("organization", selector.DoesNotExist)),
+			store.WithFieldRequirements(selector.RequirementDoesNotExist("organization")),
 		)
 		assertListIDs(t, ctx, storage, []string{"root-blue"}, store.WithLabelRequirementsFromSet(map[string]string{"team": "blue"}))
 		assertListIDs(t, ctx, storage, []string{"root-blue"}, store.WithFieldRequirements(selector.RequirementEqual("enabled", true)))
@@ -294,7 +294,7 @@ func TestEtcdCacherStore(t *testing.T) {
 		for pageNumber := 0; ; pageNumber++ {
 			page := &store.List[MyObject]{}
 			if err := storage.List(ctx, page,
-				store.WithContinue(continueToken, 2),
+				store.WithContinueLimit(continueToken, 2),
 				store.WithSearch("match"),
 			); err != nil {
 				t.Fatalf("List(page %d) error = %v", pageNumber, err)

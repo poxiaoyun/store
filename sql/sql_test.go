@@ -256,13 +256,13 @@ func runSQLStoreConformance(t *testing.T, driver, dsn string, isPostgres bool) {
 			t.Fatalf("descendant count=%d", count)
 		}
 		all := &store.List[storetest.Object]{}
-		if err := storage.List(t.Context(), all, store.WithSubScopes(), store.WithSort("id+"), store.WithContinue("", 2)); err != nil {
+		if err := storage.List(t.Context(), all, store.WithSubScopes(), store.WithSort("id+"), store.WithContinueLimit("", 2)); err != nil {
 			t.Fatal(err)
 		}
 		if len(all.Items) != 2 || all.Continue == "" {
 			t.Fatal(all)
 		}
-		if err := storage.List(t.Context(), all, store.WithSubScopes(), store.WithSort("id+"), store.WithContinue(all.Continue, 2)); err != nil {
+		if err := storage.List(t.Context(), all, store.WithSubScopes(), store.WithSort("id+"), store.WithContinueLimit(all.Continue, 2)); err != nil {
 			t.Fatal(err)
 		}
 		if len(all.Items) != 1 || all.Continue != "" {

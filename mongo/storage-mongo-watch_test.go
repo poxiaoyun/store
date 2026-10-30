@@ -25,7 +25,7 @@ func TestMongoStorageWatchIntegration(t *testing.T) {
 	defer cancel()
 
 	watcher, err := storage.Watch(ctx, &store.List[Message]{},
-		store.WithLabelRequirements(selector.NewRequirement("example.com/team", selector.Equals, "platform")),
+		store.WithLabelRequirements(selector.RequirementEqual("example.com/team", "platform")),
 	)
 	if err != nil {
 		t.Fatalf("watch messages: %v", err)
@@ -80,7 +80,7 @@ func TestMongoStorageWatchInitialEventsAndSelectorTransitions(t *testing.T) {
 		t.Context(),
 		&store.List[Message]{},
 		store.WithSendInitialEvents(),
-		store.WithLabelRequirements(selector.NewRequirement("team", selector.Equals, "platform")),
+		store.WithLabelRequirements(selector.RequirementEqual("team", "platform")),
 	)
 	if err != nil {
 		t.Fatalf("watch messages: %v", err)
