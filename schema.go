@@ -12,8 +12,10 @@ import (
 )
 
 var (
-	resourceOrIndexNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
-	fieldPathPattern           = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+	// ResourceOrIndexNamePattern matches supported resource and index identifiers.
+	ResourceOrIndexNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
+	// FieldPathPattern matches dotted field paths.
+	FieldPathPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 )
 
 // Index describes a resource index. Fields are ordered and are normalized to
@@ -80,19 +82,19 @@ func (s *Schema) Register(obj Object, definition ResourceSchema) error {
 		return fmt.Errorf("schema is nil")
 	}
 	if obj == nil || reflect.ValueOf(obj).
-		Kind() == reflect.Ptr && reflect.ValueOf(obj).
+		Kind() == reflect.Pointer && reflect.ValueOf(obj).
 		IsNil() {
 		return fmt.Errorf("object is nil")
 	}
 	resource := definition.ResourceName
 	var err error
 	if resource == "" {
-		resource, err = ReflectResourceName(reflect.TypeOf(obj))
+		resource, err = reflectResourceName(reflect.TypeOf(obj))
 		if err != nil {
 			return err
 		}
 	}
-	if !resourceOrIndexNamePattern.MatchString(resource) {
+	if !ResourceOrIndexNamePattern.MatchString(resource) {
 		return fmt.Errorf("resource name %q is invalid", resource)
 	}
 	definition.ResourceName = resource
@@ -149,23 +151,21 @@ func (s *Schema) ResourceName(obj any) (string, error) {
 		for key.Kind() == reflect.Pointer {
 			key = key.Elem()
 		}
-		s.mu.RLock()
-		resource, exists := s.types[key]
-		s.mu.RUnlock()
-		if !exists {
-			return ReflectResourceName(key)
-		}
-		return resource, nil
+		return s.resourceNameForType(key)
 	}
 	key := resourceType(obj)
 	if key == nil {
 		return "", fmt.Errorf("object is nil")
 	}
+	return s.resourceNameForType(key)
+}
+
+func (s *Schema) resourceNameForType(key reflect.Type) (string, error) {
 	s.mu.RLock()
 	resource, exists := s.types[key]
 	s.mu.RUnlock()
 	if !exists {
-		return ReflectResourceName(key)
+		return reflectResourceName(key)
 	}
 	return resource, nil
 }
@@ -199,11 +199,11 @@ func (s *Schema) Resources() []string {
 		return nil
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	resources := make([]string, 0, len(s.resources))
 	for resource := range s.resources {
 		resources = append(resources, resource)
 	}
+	s.mu.RUnlock()
 	sort.Strings(resources)
 	return resources
 }
@@ -215,20 +215,20 @@ func (s *Schema) NewObject(resource string) (Object, error) {
 	}
 	typeOf := reflect.TypeOf(definition.Object)
 	var object Object
-	if typeOf.Kind() == reflect.Ptr {
-		object = reflect.New(typeOf.Elem()).
-			Interface().(Object)
+	if typeOf.Kind() == reflect.Pointer {
+		object = reflect.New(typeOf.Elem()).Interface().(Object)
 	} else {
-		object = reflect.New(typeOf).
-			Elem().
-			Interface().(Object)
+		object = reflect.New(typeOf).Elem().Interface().(Object)
 	}
 	object.SetResource(resource)
 	return object, nil
 }
 
-// Snapshot returns an independent copy of the schema.
-func (s *Schema) Snapshot() *Schema {
+// Clone returns an independent copy of the schema; a nil receiver returns nil.
+func (s *Schema) Clone() *Schema {
+	if s == nil {
+		return nil
+	}
 	clone := NewSchema()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -237,15 +237,6 @@ func (s *Schema) Snapshot() *Schema {
 	}
 	maps.Copy(clone.types, s.types)
 	return clone
-
-}
-
-// Clone returns an independent snapshot suitable for store construction.
-func (s *Schema) Clone() (*Schema, error) {
-	if s == nil {
-		return nil, fmt.Errorf("schema is nil")
-	}
-	return s.Snapshot(), nil
 }
 
 func normalizeResourceSchema(resource string, definition ResourceSchema) (ResourceSchema, error) {
@@ -258,26 +249,20 @@ func normalizeResourceSchema(resource string, definition ResourceSchema) (Resour
 	}
 	definition.ScopeKeys = append([]string(nil), definition.ScopeKeys...)
 	seenScopeKeys := map[string]struct{}{}
-	for i, field := range definition.ScopeKeys {
-		field = strings.TrimSpace(field)
-		if field == "" {
-			return ResourceSchema{}, fmt.Errorf("resource %q has an empty scope key", resource)
-		}
-		if !fieldPathPattern.MatchString(field) {
+	for _, field := range definition.ScopeKeys {
+		if !FieldPathPattern.MatchString(field) {
 			return ResourceSchema{}, fmt.Errorf("resource %q has invalid scope key %q", resource, field)
 		}
 		if _, exists := seenScopeKeys[field]; exists {
 			return ResourceSchema{}, fmt.Errorf("resource %q has duplicate scope key %q", resource, field)
 		}
 		seenScopeKeys[field] = struct{}{}
-		definition.ScopeKeys[i] = field
 	}
 
 	definition.FieldSpecs = append([]FieldSpec(nil), definition.FieldSpecs...)
 	seenFieldSpecs := map[string]struct{}{}
-	for i, spec := range definition.FieldSpecs {
-		spec.Name = strings.TrimSpace(spec.Name)
-		if !fieldPathPattern.MatchString(spec.Name) {
+	for _, spec := range definition.FieldSpecs {
+		if !FieldPathPattern.MatchString(spec.Name) {
 			return ResourceSchema{}, fmt.Errorf("resource %q has invalid field spec name %q", resource, spec.Name)
 		}
 		if spec.Size < 0 {
@@ -287,13 +272,12 @@ func normalizeResourceSchema(resource string, definition ResourceSchema) (Resour
 			return ResourceSchema{}, fmt.Errorf("resource %q has duplicate field spec %q", resource, spec.Name)
 		}
 		seenFieldSpecs[spec.Name] = struct{}{}
-		definition.FieldSpecs[i] = spec
 	}
 
 	indexes := make([]Index, 0, len(definition.Indexes)+1)
 	indexes = append(indexes, Index{Fields: []string{"id"}, Unique: true})
 	indexes = append(indexes, definition.Indexes...)
-	seenNames := map[string]struct{}{}
+	seenNames := map[string]int{}
 	normalized := make([]Index, 0, len(indexes))
 	for _, index := range indexes {
 		index.Fields = append([]string(nil), index.Fields...)
@@ -304,19 +288,14 @@ func normalizeResourceSchema(resource string, definition ResourceSchema) (Resour
 			return ResourceSchema{}, fmt.Errorf("resource %q index %q has no fields", resource, index.Name)
 		}
 		seenFields := map[string]struct{}{}
-		for i, field := range index.Fields {
-			field = strings.TrimSpace(field)
-			if field == "" {
-				return ResourceSchema{}, fmt.Errorf("resource %q index %q has an empty field", resource, index.Name)
-			}
-			if !fieldPathPattern.MatchString(field) {
+		for _, field := range index.Fields {
+			if !FieldPathPattern.MatchString(field) {
 				return ResourceSchema{}, fmt.Errorf("resource %q index %q has invalid field %q", resource, index.Name, field)
 			}
 			if _, exists := seenFields[field]; exists {
 				return ResourceSchema{}, fmt.Errorf("resource %q index %q has duplicate field %q", resource, index.Name, field)
 			}
 			seenFields[field] = struct{}{}
-			index.Fields[i] = field
 		}
 		if !index.Global {
 			for _, scopeKey := range definition.ScopeKeys {
@@ -329,25 +308,18 @@ func normalizeResourceSchema(resource string, definition ResourceSchema) (Resour
 		if index.Name == "" {
 			index.Name = strings.ReplaceAll(strings.Join(index.Fields, "_"), ".", "_")
 		}
-		if !resourceOrIndexNamePattern.MatchString(index.Name) {
+		if !ResourceOrIndexNamePattern.MatchString(index.Name) {
 			return ResourceSchema{}, fmt.Errorf("resource %q has invalid index name %q", resource, index.Name)
 		}
-		if _, exists := seenNames[index.Name]; exists {
+		if position, exists := seenNames[index.Name]; exists {
 			// An explicit primary index replaces the implicit one.
-			replaced := false
-			for i := range normalized {
-				if slices.Equal(normalized[i].Fields, index.Fields) && index.Unique && !index.Nullable && definition.IsPrimaryIndex(normalized[i]) {
-					normalized[i] = index
-					replaced = true
-					break
-				}
-			}
-			if replaced {
+			if definition.IsPrimaryIndex(normalized[position]) && definition.IsPrimaryIndex(index) {
+				normalized[position] = index
 				continue
 			}
 			return ResourceSchema{}, fmt.Errorf("resource %q has duplicate index name %q", resource, index.Name)
 		}
-		seenNames[index.Name] = struct{}{}
+		seenNames[index.Name] = len(normalized)
 		normalized = append(normalized, index)
 	}
 	definition.Indexes = normalized
@@ -406,4 +378,31 @@ func cloneResourceSchema(definition ResourceSchema) ResourceSchema {
 		clone.Indexes[i].Fields = append([]string(nil), index.Fields...)
 	}
 	return clone
+}
+
+// reflectResourceName derives the plural resource name from a named Go type.
+func reflectResourceName(t reflect.Type) (string, error) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	typename := t.Name()
+	// remove generic type suffix
+	if i := strings.Index(typename, "["); i != -1 {
+		typename = typename[:i]
+	}
+	if typename == "" {
+		return "", fmt.Errorf("cannot get resource name from type %v", t)
+	}
+	return simpleNameToPlural(strings.ToLower(typename)), nil
+}
+
+// simpleNameToPlural applies Store’s resource-name pluralization rules.
+func simpleNameToPlural(name string) string {
+	if strings.HasSuffix(name, "s") {
+		return name
+	}
+	if before, ok := strings.CutSuffix(name, "y"); ok {
+		return before + "ies"
+	}
+	return strings.ToLower(name) + "s"
 }

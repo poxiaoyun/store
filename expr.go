@@ -162,7 +162,7 @@ func (e Expr) validate(depth int, nodes *int) error {
 		if e.Path == "" {
 			return errors.NewBadRequest("field expression requires a path")
 		}
-		if !fieldPathPattern.MatchString(e.Path) {
+		if !FieldPathPattern.MatchString(e.Path) {
 			return errors.NewBadRequest(fmt.Sprintf("field expression has invalid path %q", e.Path))
 		}
 		if len(e.Args) != 0 {

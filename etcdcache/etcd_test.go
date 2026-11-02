@@ -38,7 +38,11 @@ func TestStoreConformance(t *testing.T) {
 		New: func(t testing.TB, schema *store.Schema) (store.Store, error) {
 			storage, err := NewEtcdCacherFromClient(t.Context(), client, schema, "/store-conformance/"+uuid.NewString())
 			if err == nil {
-				t.Cleanup(storage.Close)
+				t.Cleanup(func() {
+					if err := storage.Close(); err != nil {
+						t.Error(err)
+					}
+				})
 			}
 			return storage, err
 		},
@@ -430,7 +434,11 @@ func newTestStoreAtPrefix(t *testing.T, ctx context.Context, client *kubernetes.
 	if err != nil {
 		t.Fatalf("NewEtcdCacherFromClient() error = %v", err)
 	}
-	t.Cleanup(storage.Close)
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	return storage
 }
 

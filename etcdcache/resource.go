@@ -87,7 +87,8 @@ type resourceRegistry struct {
 	cancel      context.CancelFunc
 	indexFields map[string][]string
 	factory     resourceFactory
-	onClose     func()
+	closeErr    error
+	onClose     func() error
 
 	mu        sync.RWMutex
 	resources map[string]*resourceDB
@@ -103,7 +104,7 @@ func newResourceRegistry(
 	ctx context.Context,
 	indexFields map[string][]string,
 	factory resourceFactory,
-	onClose func(),
+	onClose func() error,
 ) *resourceRegistry {
 	if ctx == nil {
 		ctx = context.Background()
@@ -211,7 +212,7 @@ func (r *resourceRegistry) Close() {
 		db.Close()
 	}
 	if onClose != nil {
-		onClose()
+		r.closeErr = onClose()
 	}
 	close(r.closeDone)
 }

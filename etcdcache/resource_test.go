@@ -111,8 +111,9 @@ func TestResourceRegistryClosesResourcesWhenContextEnds(t *testing.T) {
 				},
 			}, nil
 		},
-		func() {
+		func() error {
 			ownerCloses.Add(1)
+			return nil
 		},
 	)
 
@@ -180,7 +181,7 @@ func TestResourceRegistryCloseWaitsForResourceConstruction(t *testing.T) {
 				destroy:  func() { resourceCloses.Add(1) },
 			}, nil
 		},
-		func() { ownerCloses.Add(1) },
+		func() error { ownerCloses.Add(1); return nil },
 	)
 
 	getDone := make(chan error, 1)
@@ -210,5 +211,19 @@ func TestResourceRegistryCloseWaitsForResourceConstruction(t *testing.T) {
 	}
 	if got := ownerCloses.Load(); got != 1 {
 		t.Fatalf("owner closes = %d, want 1", got)
+	}
+}
+
+func TestClosePreservesOwnerError(t *testing.T) {
+	failure := stderrors.New("client close failed")
+	calls := 0
+	registry := newResourceRegistry(t.Context(), nil, nil, func() error {
+		calls++
+		return failure
+	})
+	registry.Close()
+	registry.Close()
+	if calls != 1 || !stderrors.Is(registry.closeErr, failure) {
+		t.Fatalf("close calls=%d error=%v", calls, registry.closeErr)
 	}
 }

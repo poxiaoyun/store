@@ -313,3 +313,31 @@ func TestValidateSchemaRejectsSecondaryIndex(t *testing.T) {
 		t.Fatal("validateSchema() error = nil")
 	}
 }
+
+func TestCloseOwnedAndBorrowedClients(t *testing.T) {
+	client := testserver.RunEtcd(t, nil)
+	borrowed, err := NewEtcdStoreFromClient(client, store.NewSchema(), "/borrowed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := borrowed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Client.Get(t.Context(), "close-test"); err != nil {
+		t.Fatal(err)
+	}
+	owned, err := NewEtcdStore(t.Context(), store.NewSchema(), &Options{Servers: client.Client.Endpoints(), KeyPrefix: "/owned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owned.Ping(t.Context()); err != nil {
+		return
+	}
+	t.Fatal("owned connection remained usable after Close")
+}

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
@@ -102,16 +103,21 @@ func NewEtcdStore(ctx context.Context, schema *store.Schema, c *Options) (*EtcdS
 	log := log.FromContext(ctx)
 	log.Info("checking etcd server health")
 	if _, err := client.Get(timeouts, "health", kubernetes.GetOptions{}); err != nil {
-		return nil, fmt.Errorf("etcd server is not reachable: %v", err)
+		return nil, stderrors.Join(fmt.Errorf("etcd server is not reachable: %w", err), client.Close())
 	}
-	return NewEtcdStoreFromClient(client, schema, c.KeyPrefix)
+	storage, err := NewEtcdStoreFromClient(client, schema, c.KeyPrefix)
+	if err != nil {
+		return nil, stderrors.Join(err, client.Close())
+	}
+	storage.core.close = sync.OnceValue(client.Close)
+	return storage, nil
 }
 
 func NewEtcdStoreFromClient(client *kubernetes.Client, schema *store.Schema, keyPrefix string) (*EtcdStore, error) {
-	schema, err := schema.Clone()
-	if err != nil {
-		return nil, err
+	if schema == nil {
+		return nil, fmt.Errorf("schema is nil")
 	}
+	schema = schema.Clone()
 	if err := validateSchema(schema); err != nil {
 		return nil, err
 	}
@@ -144,6 +150,7 @@ func validateSchema(schema *store.Schema) error {
 }
 
 var _ store.PingableStore = &EtcdStore{}
+var _ store.ClosableStore = &EtcdStore{}
 
 type EtcdStore struct {
 	scopes []store.Scope
@@ -152,7 +159,7 @@ type EtcdStore struct {
 
 // Schema implements store.Store.
 func (e *EtcdStore) Schema() *store.Schema {
-	return e.core.schema.Snapshot()
+	return e.core.schema.Clone()
 }
 
 // Capabilities implements store.Store.
@@ -597,6 +604,7 @@ func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...
 }
 
 type etcdStoreCore struct {
+	close      func() error
 	KeyPrefix  string
 	client     *kubernetes.Client
 	schema     *store.Schema
@@ -928,6 +936,14 @@ func CopyField(to, from any, field string) error {
 		if _, err := SetObjectField(to, field, oldStatus); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Close releases an owned client once. A borrowed client remains open.
+func (e *EtcdStore) Close() error {
+	if e.core.close != nil {
+		return e.core.close()
 	}
 	return nil
 }

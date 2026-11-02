@@ -48,6 +48,7 @@ func NewDefaultMongoOptions(dbname string) *MongoDBOptions {
 
 var _ store.TransactionStore = &MongoStorage{}
 var _ store.PingableStore = &MongoStorage{}
+var _ store.ClosableStore = &MongoStorage{}
 
 // Registry extends the driver's registry with paired codec registration.
 // Complete registration before the registry's first use.
@@ -160,10 +161,10 @@ func WithBSONRegistry(registry *bsoncodec.Registry) MongoStorageOption {
 }
 
 func NewMongoStorage(ctx context.Context, schema *store.Schema, options *MongoDBOptions, opts ...MongoStorageOption) (*MongoStorage, error) {
-	schema, err := schema.Clone()
-	if err != nil {
-		return nil, err
+	if schema == nil {
+		return nil, fmt.Errorf("schema is nil")
 	}
+	schema = schema.Clone()
 	mongoBsonOptions := &mongooptions.BSONOptions{UseJSONStructTags: true, OmitZeroStruct: true}
 	registry := NewRegistry()
 	RegisterCodecs(registry)
@@ -188,9 +189,7 @@ func NewMongoStorage(ctx context.Context, schema *store.Schema, options *MongoDB
 			WithName("mongo-storage"),
 	}
 	if err := core.initCollections(ctx); err != nil {
-		_ = db.Client().
-			Disconnect(ctx)
-		return nil, err
+		return nil, stderrors.Join(err, closeClient(db.Client()))
 	}
 	storage := &MongoStorage{core: core}
 	return storage, nil
@@ -219,12 +218,14 @@ func NewMongoDB(ctx context.Context,
 		return nil, errors.NewInternalError(err)
 	}
 	if err := cli.Ping(ctx, nil); err != nil {
-		return nil, errors.NewInternalError(err)
+		return nil, stderrors.Join(errors.NewInternalError(err), closeClient(cli))
 	}
 	return cli.Database(opts.Database), nil
 }
 
 type MongoStorageCore struct {
+	closeOnce      sync.Once
+	closeErr       error
 	schema         *store.Schema
 	db             *mongo.Database
 	bsonRegistry   *bsoncodec.Registry
@@ -291,10 +292,16 @@ func (m *MongoStorage) Capabilities() store.Capabilities {
 	return store.Capabilities{Finalizers: true, OptimisticLock: true, Watch: true}
 }
 
-// Close releases the client owned by this storage instance.
-func (m *MongoStorage) Close(ctx context.Context) error {
-	return m.core.db.Client().
-		Disconnect(ctx)
+// Close disconnects the owned client once, shared by all scoped handles.
+func (m *MongoStorage) Close() error {
+	m.core.closeOnce.Do(func() { m.core.closeErr = closeClient(m.core.db.Client()) })
+	return m.core.closeErr
+}
+
+func closeClient(client *mongo.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return client.Disconnect(ctx)
 }
 
 func (m *MongoStorage) Ping(ctx context.Context) error {
@@ -304,7 +311,7 @@ func (m *MongoStorage) Ping(ctx context.Context) error {
 
 // Schema implements store.Store.
 func (m *MongoStorage) Schema() *store.Schema {
-	return m.core.schema.Snapshot()
+	return m.core.schema.Clone()
 }
 
 func (m *MongoStorage) Database() *mongo.Database {

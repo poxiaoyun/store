@@ -2,6 +2,7 @@ package etcdcache
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"path"
 	"reflect"
@@ -97,12 +98,9 @@ func NewEtcdCacher(ctx context.Context, schema *store.Schema, options *Options) 
 		Client: cli,
 	}
 	kubernetescli.Kubernetes = &kubernetescli
-	result, err := newEtcdCacherFromClient(ctx, &kubernetescli, schema, options.KeyPrefix, func() {
-		_ = cli.Close()
-	})
+	result, err := newEtcdCacherFromClient(ctx, &kubernetescli, schema, options.KeyPrefix, cli.Close)
 	if err != nil {
-		_ = cli.Close()
-		return nil, err
+		return nil, stderrors.Join(err, cli.Close())
 	}
 	return result, nil
 }
@@ -116,15 +114,15 @@ func newEtcdCacherFromClient(
 	cli *kubernetes.Client,
 	schema *store.Schema,
 	storagePrefix string,
-	onClose func(),
+	onClose func() error,
 ) (*generic, error) {
 	if cli == nil || cli.Client == nil {
 		return nil, fmt.Errorf("etcd client is nil")
 	}
-	schema, err := schema.Clone()
-	if err != nil {
-		return nil, err
+	if schema == nil {
+		return nil, fmt.Errorf("schema is nil")
 	}
+	schema = schema.Clone()
 	resourceFields := make(map[string][]string)
 	for _, resource := range schema.Resources() {
 		definition, err := schema.Resource(resource)
@@ -177,9 +175,11 @@ type generic struct {
 	scopes []store.Scope
 }
 
+var _ store.ClosableStore = (*generic)(nil)
+
 // Schema implements store.Store.
 func (c *generic) Schema() *store.Schema {
-	return c.core.schema.Snapshot()
+	return c.core.schema.Clone()
 }
 
 // Capabilities implements store.Store.
@@ -189,8 +189,9 @@ func (c *generic) Capabilities() store.Capabilities {
 
 // Close stops all resource reflectors and caches. It does not close a client
 // supplied to NewEtcdCacherFromClient; NewEtcdCacher closes the client it owns.
-func (c *generic) Close() {
+func (c *generic) Close() error {
 	c.core.resources.Close()
+	return c.core.resources.closeErr
 }
 
 func (c *generic) Ping(ctx context.Context) error {

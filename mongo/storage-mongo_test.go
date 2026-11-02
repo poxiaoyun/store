@@ -3,7 +3,9 @@ package mongo
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"net"
+	"net/url"
 	"reflect"
 	"slices"
 	"sort"
@@ -808,5 +810,35 @@ func TestPartialFilterExpression(t *testing.T) {
 	}}
 	if got := PartialFilterExpression([]string{"email", "tenant"}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("PartialFilterExpression() = %#v, want %#v", got, want)
+	}
+}
+
+func TestMongoStorageCloseDisconnectsOwnedClient(t *testing.T) {
+	address, err := url.Parse(testmongodb.RequireURI(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := NewDefaultMongoOptions("close_test")
+	options.Address = address.Host
+	options.Username = ""
+	if address.User != nil {
+		options.Username = address.User.Username()
+		options.Password, _ = address.User.Password()
+	}
+	query := address.Query()
+	options.ReplicaSet = query.Get("replicaSet")
+	options.Direct = query.Get("directConnection") == "true"
+	storage, err := NewMongoStorage(t.Context(), store.NewSchema(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Ping(t.Context()); !stderrors.Is(err, mongo.ErrClientDisconnected) {
+		t.Fatalf("Ping after Close = %v", err)
 	}
 }

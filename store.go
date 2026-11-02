@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -365,4 +366,12 @@ type TransactionOption interface {
 type TransactionStore interface {
 	Store
 	Transaction(ctx context.Context, fn func(ctx context.Context, store Store) error, opts ...TransactionOption) error
+}
+
+// ClosableStore adds creator-owned resource cleanup to Store. Close is idempotent.
+// Scoped views share resources; close the root after stopping operations and watches.
+// Borrowed resources remain owned by their creator. Business callers use Store.
+type ClosableStore interface {
+	Store
+	io.Closer
 }

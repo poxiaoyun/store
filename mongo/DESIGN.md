@@ -15,7 +15,7 @@ registry 同时编码持久化值与查询操作数，避免写入和过滤使�
 编码和解码，通过嵌入的 Registry 接入驱动。首次使用前完成全部注册，生命周期由实例持有。
 
 构造期间打开客户端后，collection 或索引初始化失败会先断开该客户端。构造成功的实例
-由调用方通过 `Close(ctx)` 释放。Watch 依赖 replica set 或 sharded cluster 提供的
+由调用方通过 `Close()` 释放。Watch 依赖 replica set 或 sharded cluster 提供的
 change stream。
 
 ## 补丁

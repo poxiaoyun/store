@@ -24,7 +24,7 @@ type InMemory struct {
 
 // Schema implements store.Store.
 func (i *InMemory) Schema() *store.Schema {
-	return i.core.schema.Snapshot()
+	return i.core.schema.Clone()
 }
 
 // Capabilities implements store.Store.
@@ -33,10 +33,10 @@ func (i *InMemory) Capabilities() store.Capabilities {
 }
 
 func New(schema *store.Schema) (*InMemory, error) {
-	schema, err := schema.Clone()
-	if err != nil {
-		return nil, err
+	if schema == nil {
+		return nil, fmt.Errorf("schema is nil")
 	}
+	schema = schema.Clone()
 	return &InMemory{core: &inmemory{
 		kvs:      map[string]kv{},
 		indexes:  map[string]map[string]map[string]map[string]struct{}{},

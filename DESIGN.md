@@ -208,6 +208,8 @@ ObjectList 承载对象、Resource、Scopes、ResourceVersion 与 Continue。Lis
 
 ## Options 与 selector
 
+Schema 注册时直接校验字段路径，包含首尾空白的路径视为非法，不自动修正。
+
 操作选项使用开放的 variadic option interface。标准 option 是实现
 `ApplyToXxx(*XxxOptions)` 的具体值，不使用捕获闭包；最终的 XxxOptions 不同时充当
 option。标量按声明顺序覆盖，requirements 按顺序追加。`ApplyXxxOptions` 是统一展开入口，
@@ -319,3 +321,11 @@ Context 控制；Context 结束返回其错误。读取来源由请求契约决�
 互斥、Scope 精确性、分页结束与 token 失效、显式快照、List/Count 谓词一致、唯一约束及
 Watch 连续性均属于公共契约的测试范围。后端特有的编码、事务和索引机制由后端测试验证；
 真实后端的运行与环境要求由 [TESTING.md](./TESTING.md) 拥有。
+
+## 缓存
+
+缓存接口与回源封装由根包拥有，内存实现位于 inmemory。缓存是可淘汰的派生数据；业务拥有 key、loader 和失效策略。LoadingCache 回源成功后即返回业务值，缓存写入失败仅记录日志。只缓存成功加载的结果，同 key 并发加载共享结果与错误。内存 LRU 在读取时检查过期，无后台协程；窗口计数和预算在过期前保留有效状态，操作时清理过期数据。
+
+## 资源释放
+
+资源创建方可使用可选的 `ClosableStore`（`Close() error`）释放自建连接，Close 幂等。Scope 派生句柄共享资源，完成操作并停止 Watch 后关闭根实例。Etcd 借用客户端及 SQL 借用连接由原创建方关闭；MongoDB 关闭自身客户端，REST 释放自身 transport 的空闲连接。etcdcache 关闭本地缓存并释放自建客户端，返回关闭错误。构造失败释放已创建的资源。

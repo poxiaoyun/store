@@ -93,7 +93,7 @@ func newWatchGateStore() *watchGateStore {
 }
 
 func (s *watchGateStore) Schema() *store.Schema {
-	return s.schema.Snapshot()
+	return s.schema.Clone()
 }
 
 func (s *watchGateStore) Capabilities() store.Capabilities {

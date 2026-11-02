@@ -1,7 +1,15 @@
 // +k8s:openapi-gen=true
 package store
 
-import "xiaoshiai.cn/common/meta"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"time"
+	"xiaoshiai.cn/common/errors"
+	"xiaoshiai.cn/common/meta"
+)
 
 // Object exposes the metadata managed by Store implementations.
 type Object interface {
@@ -336,4 +344,75 @@ func ConvertList[T any, F any](list List[T], f func(T) F) List[F] {
 		Items:           newItems,
 		Continue:        list.Continue,
 	}
+}
+
+// CopyObject copies the JSON representation of source into target.
+func CopyObject(source, target Object) error {
+	data, err := json.Marshal(source)
+	if err != nil {
+		return err
+	}
+	ResetObject(target)
+	return json.Unmarshal(data, target)
+}
+
+// ResetObject clears target before decoding a complete replacement into it.
+func ResetObject(target Object) {
+	value := reflect.ValueOf(target).
+		Elem()
+	value.Set(reflect.Zero(value.Type()))
+}
+
+// ServerTimestampNow returns the JSON precision shared by Store backends.
+func ServerTimestampNow() meta.Time {
+	now := time.Now().
+		UTC().
+		Truncate(time.Second)
+	return meta.Time{Time: now}
+}
+
+// ObjectToMap returns the JSON object representation of obj. JSON numbers use
+// json.Number so subsequent merging and decoding cannot round integer values.
+func ObjectToMap(obj Object) (map[string]any, error) {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ValidatePreconditions checks exact object identity and version for Get, Patch or Delete.
+func ValidatePreconditions(obj Object, preconditions *Preconditions) error {
+	if preconditions == nil {
+		return nil
+	}
+	if preconditions.UID != nil && obj.GetUID() != *preconditions.UID {
+		return errors.NewConflict(obj.GetResource(), obj.GetID(), fmt.Errorf("UID does not match"))
+	}
+	if preconditions.ResourceVersion != nil && obj.GetResourceVersion() != *preconditions.ResourceVersion {
+		return errors.NewConflict(obj.GetResource(), obj.GetID(), fmt.Errorf("resourceVersion does not match"))
+	}
+	return nil
+}
+
+// ValidateDeleteRequirements checks caller-supplied object selectors.
+func ValidateDeleteRequirements(obj Object, labelRequirements, fieldRequirements Requirements) error {
+	if err := ValidateSelectorRequirements(labelRequirements, fieldRequirements); err != nil {
+		return errors.NewBadRequest(err.Error())
+	}
+	unstructured, err := ToUnstructured(obj)
+	if err != nil {
+		return err
+	}
+	if !MatchLabelReqirements(obj, labelRequirements) ||
+		!MatchUnstructuredFieldRequirments(unstructured, fieldRequirements) {
+		return errors.NewConflict(obj.GetResource(), obj.GetID(), fmt.Errorf("write conditions did not match"))
+	}
+	return nil
 }

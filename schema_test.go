@@ -76,10 +76,7 @@ func TestSchemaClone(t *testing.T) {
 	if err := schema.Register(object, ResourceSchema{ResourceName: "users", Indexes: []Index{{Fields: []string{"email"}}}}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	clone, err := schema.Clone()
-	if err != nil {
-		t.Fatalf("Clone() error = %v", err)
-	}
+	clone := schema.Clone()
 	definition, err := clone.Resource("users")
 	if err != nil {
 		t.Fatalf("Resource() error = %v", err)
@@ -91,14 +88,14 @@ func TestSchemaClone(t *testing.T) {
 	}
 }
 
-func TestSchemaSnapshot(t *testing.T) {
+func TestSchemaCloneIsolatesRegistrations(t *testing.T) {
 	schema := NewSchema()
 	object := &schemaTestObject{ObjectMeta: ObjectMeta{Resource: "users"}}
 	if err := schema.Register(object, ResourceSchema{ResourceName: "users"}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	snapshot := schema.Snapshot()
+	snapshot := schema.Clone()
 	if err := snapshot.Register(
 		&schemaSnapshotObject{},
 		ResourceSchema{ResourceName: "groups"},
@@ -106,7 +103,7 @@ func TestSchemaSnapshot(t *testing.T) {
 		t.Fatalf("snapshot Register() error = %v", err)
 	}
 	if _, err := schema.Resource("groups"); err == nil {
-		t.Fatal("Snapshot() shares registered resources with original schema")
+		t.Fatal("Clone() shares registered resources with original schema")
 	}
 }
 
@@ -131,5 +128,25 @@ func TestSchemaExplicitPrimaryReplacesDefault(t *testing.T) {
 	}
 	if primaryCount != 1 {
 		t.Fatalf("primary index count = %d, want 1", primaryCount)
+	}
+}
+
+func TestSchemaRejectsWhitespaceInFieldPaths(t *testing.T) {
+	for _, definition := range []ResourceSchema{
+		{ScopeKeys: []string{" tenant "}},
+		{FieldSpecs: []FieldSpec{{Name: " email "}}},
+		{Indexes: []Index{{Fields: []string{" email "}}}},
+	} {
+		if err := NewSchema().Register(&schemaTestObject{}, definition); err != nil {
+			continue
+		}
+		t.Fatalf("accepted invalid field path: %+v", definition)
+	}
+}
+
+func TestSchemaCloneNil(t *testing.T) {
+	var schema *Schema
+	if schema.Clone() != nil {
+		t.Fatal("nil schema clone must be nil")
 	}
 }

@@ -47,10 +47,10 @@ type Storage struct {
 // resource schema and returns the root Store. The caller owns connection settings,
 // database provisioning and closing the database, including on construction failure.
 func NewStorage(ctx context.Context, schema *store.Schema, db Database, dialect Dialect) (*Storage, error) {
-	cloned, err := schema.Clone()
-	if err != nil {
-		return nil, err
+	if schema == nil {
+		return nil, fmt.Errorf("schema is nil")
 	}
+	cloned := schema.Clone()
 	storage := &Storage{core: &core{
 		dialect:  dialect,
 		codec:    NewModelCodec(),
@@ -66,7 +66,7 @@ func NewStorage(ctx context.Context, schema *store.Schema, db Database, dialect 
 
 // Schema implements store.Store.
 func (s *Storage) Schema() *store.Schema {
-	return s.core.schema.Snapshot()
+	return s.core.schema.Clone()
 }
 
 // Capabilities implements store.Store.

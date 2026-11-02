@@ -17,11 +17,13 @@ import (
 )
 
 var _ store.PingableStore = &Client{}
+var _ store.ClosableStore = &Client{}
 
 // NewRemoteStore creates a REST-backed Store using explicit local resource and remote capability contracts.
 func NewRemoteStore(server *url.URL, schema *store.Schema, capabilities store.Capabilities) *Client {
 	return &Client{
 		cli: &httpclient.Client{
+			Client: &http.Client{Transport: httpclient.NewDefaultHTTPTransport()},
 			Server: server,
 			OnResponse: func(req *http.Request, resp *http.Response) error {
 				if resp.StatusCode < 400 {
@@ -35,7 +37,7 @@ func NewRemoteStore(server *url.URL, schema *store.Schema, capabilities store.Ca
 				return errors.NewBadRequest(string(body))
 			},
 		},
-		schema:       schema.Snapshot(),
+		schema:       schema.Clone(),
 		capabilities: capabilities,
 	}
 }
@@ -49,7 +51,7 @@ type Client struct {
 
 // Schema implements store.Store.
 func (c *Client) Schema() *store.Schema {
-	return c.schema.Snapshot()
+	return c.schema.Clone()
 }
 
 // Capabilities returns the remote contract supplied by the constructor.
@@ -495,4 +497,10 @@ func addPreconditionQueries(queries url.Values, conditions *store.Preconditions)
 	if conditions.ResourceVersion != nil {
 		queries.Set("preconditionResourceVersion", strconv.FormatInt(*conditions.ResourceVersion, 10))
 	}
+}
+
+// Close releases idle connections in the owned HTTP transport. It is idempotent.
+func (c *Client) Close() error {
+	c.cli.Client.CloseIdleConnections()
+	return nil
 }

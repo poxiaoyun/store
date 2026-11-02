@@ -200,3 +200,11 @@ MongoDB 消费需要 replica set 或 sharded cluster 提供 change stream。通�
 轮询负责延迟消息和补漏；积压消息连续领取，不在每条消息间等待。连接的超时配置也适用于
 退出时的确认或释放操作。进程崩溃或数据库确认失败可能留下处理中消息，Queue 不自动回收；
 需要执行租约和自动重试时使用 task。
+
+## 缓存
+
+根包提供 `Cache[T]`、`LoadingCache[T]`、窗口计数及限流接口。`inmemory.NewCache[T](capacity)` 创建容量有界的 LRU；Set 的 TTL 为零表示不过期，负值非法。`LoadingCache[T]` 嵌入 `Cache[T]`，保留 Get、Set、Delete 的原始合同；`NewLoadingCache(backend, ttl, loader)` 配置回源及其缓存 TTL，`GetOrLoad` 合并同一 key 的并发加载，失败结果不缓存，成功回源后的缓存写入失败仅记日志。首个调用者控制共享加载的 ctx，各等待者可独立取消等待。缓存值及其引用内容保持不可变。
+
+## 资源释放
+
+资源创建方可使用可选的 `ClosableStore`（`Close() error`）释放自建连接，Close 幂等。Scope 派生句柄共享资源，完成操作并停止 Watch 后关闭根实例。Etcd 借用客户端及 SQL 借用连接由原创建方关闭；MongoDB 关闭自身客户端，REST 释放自身 transport 的空闲连接。etcdcache 关闭本地缓存并释放自建客户端，返回关闭错误。构造失败释放已创建的资源。
