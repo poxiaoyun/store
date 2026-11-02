@@ -1030,11 +1030,16 @@ func (m *inmemory) removeIndexes(resource, objectKey string, values map[string]s
 
 func getkey(resource string, scopes []store.Scope, name string) string {
 	var key strings.Builder
-	key.WriteString("/" + resource)
+	key.WriteString("/")
+	key.WriteString(resource)
 	for _, scope := range scopes {
-		key.WriteString("/" + scope.Resource + "/" + scope.Name)
+		key.WriteByte('/')
+		key.WriteString(scope.Resource)
+		key.WriteByte('/')
+		key.WriteString(scope.Name)
 	}
-	key.WriteString("/" + name)
+	key.WriteByte('/')
+	key.WriteString(name)
 	return key.String()
 }
 

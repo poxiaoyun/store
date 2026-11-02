@@ -380,7 +380,10 @@ func (c Client) Scope(scope ...store.Scope) store.Store {
 	var prefix strings.Builder
 	prefix.WriteString(c.scopesPrefix)
 	for _, s := range scope {
-		prefix.WriteString("/" + s.Resource + "/" + s.Name)
+		prefix.WriteByte('/')
+		prefix.WriteString(s.Resource)
+		prefix.WriteByte('/')
+		prefix.WriteString(s.Name)
 	}
 	return &Client{
 		cli:          c.cli,

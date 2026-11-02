@@ -39,7 +39,10 @@ func ScopeIndexFunc(obj any) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("scope has no name")
 		}
-		scopekey.WriteString("/" + resource + "/" + name)
+		scopekey.WriteByte('/')
+		scopekey.WriteString(resource)
+		scopekey.WriteByte('/')
+		scopekey.WriteString(name)
 	}
 	return []string{scopekey.String()}, nil
 }

@@ -645,9 +645,14 @@ func (e *etcdStoreCore) validateObject(obj store.Object) error {
 
 func (e *etcdStoreCore) getlistkey(scopes []store.Scope, resource string) string {
 	var key strings.Builder
-	key.WriteString(e.KeyPrefix + "/" + resource)
+	key.WriteString(e.KeyPrefix)
+	key.WriteByte('/')
+	key.WriteString(resource)
 	for _, scope := range scopes {
-		key.WriteString("/" + scope.Resource + "/" + scope.Name)
+		key.WriteByte('/')
+		key.WriteString(scope.Resource)
+		key.WriteByte('/')
+		key.WriteString(scope.Name)
 	}
 	return key.String() + "/"
 }
@@ -655,11 +660,17 @@ func (e *etcdStoreCore) getlistkey(scopes []store.Scope, resource string) string
 func (e *etcdStoreCore) getkey(scopes []store.Scope, resource, name string) string {
 	// merge all scopes into a single key
 	var key strings.Builder
-	key.WriteString(e.KeyPrefix + "/" + resource)
+	key.WriteString(e.KeyPrefix)
+	key.WriteByte('/')
+	key.WriteString(resource)
 	for _, scope := range scopes {
-		key.WriteString("/" + scope.Resource + "/" + scope.Name)
+		key.WriteByte('/')
+		key.WriteString(scope.Resource)
+		key.WriteByte('/')
+		key.WriteString(scope.Name)
 	}
-	key.WriteString("/" + name)
+	key.WriteByte('/')
+	key.WriteString(name)
 	return key.String()
 }
 

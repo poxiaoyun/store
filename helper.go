@@ -34,9 +34,13 @@ func ObjectReferenceFrom(obj Object) ObjectReference {
 func (r ObjectReference) String() string {
 	var key strings.Builder
 	for _, scope := range r.Scopes {
-		key.WriteString("/" + scope.Resource + "/" + scope.Name)
+		key.WriteByte('/')
+		key.WriteString(scope.Resource)
+		key.WriteByte('/')
+		key.WriteString(scope.Name)
 	}
-	key.WriteString("/" + r.ID)
+	key.WriteByte('/')
+	key.WriteString(r.ID)
 	return key.String()
 }
 
@@ -67,10 +71,15 @@ func (r ResourcedObjectReference) EqualsWithUID(other ResourcedObjectReference) 
 func (r ResourcedObjectReference) String() string {
 	var key strings.Builder
 	for _, scope := range r.Scopes {
-		key.WriteString("/" + scope.Resource + "/" + scope.Name)
+		key.WriteByte('/')
+		key.WriteString(scope.Resource)
+		key.WriteByte('/')
+		key.WriteString(scope.Name)
 	}
-	key.WriteString("/" + r.Resource)
-	key.WriteString("/" + r.ID)
+	key.WriteByte('/')
+	key.WriteString(r.Resource)
+	key.WriteByte('/')
+	key.WriteString(r.ID)
 	return key.String()
 }
 
@@ -86,10 +95,15 @@ func ResourcedObjectReferenceFrom(obj Object) ResourcedObjectReference {
 func ObjectIdentity(obj Object) string {
 	var key strings.Builder
 	for _, scope := range obj.GetScopes() {
-		key.WriteString("/" + scope.Resource + "/" + scope.Name)
+		key.WriteByte('/')
+		key.WriteString(scope.Resource)
+		key.WriteByte('/')
+		key.WriteString(scope.Name)
 	}
-	key.WriteString("/" + obj.GetResource())
-	key.WriteString("/" + obj.GetID())
+	key.WriteByte('/')
+	key.WriteString(obj.GetResource())
+	key.WriteByte('/')
+	key.WriteString(obj.GetID())
 	return key.String()
 }
 
