@@ -49,16 +49,33 @@ func NewDefaultMongoOptions(dbname string) *MongoDBOptions {
 var _ store.TransactionStore = &MongoStorage{}
 var _ store.PingableStore = &MongoStorage{}
 
-var GlobalBsonRegistry = bson.NewRegistry()
+// Registry extends the driver's registry with paired codec registration.
+// Complete registration before the registry's first use.
+type Registry struct {
+	// Registry exposes the underlying registry for MongoDB driver APIs.
+	*bsoncodec.Registry
+}
 
-func init() {
-	quantityType := reflect.TypeFor[resource.Quantity]()
-	GlobalBsonRegistry.RegisterTypeEncoder(quantityType, BsonQuantityCodec{})
-	GlobalBsonRegistry.RegisterTypeDecoder(quantityType, BsonQuantityCodec{})
+// NewRegistry creates an independent registry with the driver's standard codecs.
+func NewRegistry() *Registry {
+	return &Registry{Registry: bson.NewRegistry()}
+}
 
-	timeType := reflect.TypeFor[meta.Time]()
-	GlobalBsonRegistry.RegisterTypeEncoder(timeType, BsonTimeCodec{})
-	GlobalBsonRegistry.RegisterTypeDecoder(timeType, BsonTimeCodec{})
+// RegisterCodecs registers Store's quantity and metadata time codecs.
+// Call it before registering overrides and before the registry's first use.
+func RegisterCodecs(registry *Registry) {
+	registry.RegisterCodec(reflect.TypeFor[resource.Quantity](), BsonQuantityCodec{})
+	registry.RegisterCodec(reflect.TypeFor[meta.Time](), BsonTimeCodec{})
+}
+
+// RegisterCodec registers both the encoder and decoder for kind.
+// A later registration for the same type replaces the earlier codec.
+func (r *Registry) RegisterCodec(kind reflect.Type, codec interface {
+	bsoncodec.ValueEncoder
+	bsoncodec.ValueDecoder
+}) {
+	r.RegisterTypeEncoder(kind, codec)
+	r.RegisterTypeDecoder(kind, codec)
 }
 
 var (
@@ -148,7 +165,9 @@ func NewMongoStorage(ctx context.Context, schema *store.Schema, options *MongoDB
 		return nil, err
 	}
 	mongoBsonOptions := &mongooptions.BSONOptions{UseJSONStructTags: true, OmitZeroStruct: true}
-	settings := MongoStorageOptions{BSONRegistry: GlobalBsonRegistry}
+	registry := NewRegistry()
+	RegisterCodecs(registry)
+	settings := MongoStorageOptions{BSONRegistry: registry.Registry}
 	for _, option := range opts {
 		option(&settings)
 	}

@@ -7,10 +7,12 @@ BSON 编码、change stream Watch、事务与驱动错误映射；序列和队�
 ## 构造与编码
 
 `NewMongoStorage` 复制传入的 Schema，并为每个资源准备 collection 与索引。实例默认使用
-`GlobalBsonRegistry`；`WithBSONRegistry` 可以为单个实例提供自己的 registry。同一个
+独立的 Registry；`WithBSONRegistry` 可以为单个实例提供自己的 registry。同一个
 registry 同时编码持久化值与查询操作数，避免写入和过滤使用不同表示。默认 BSON 选项
-使用 JSON struct tag 并省略零值结构体；`GlobalBsonRegistry` 内置 `meta.Time` 与
-`resource.Quantity` 的专用 codec。
+使用 JSON struct tag 并省略零值结构体；`NewRegistry` 只创建带驱动标准 codec 的独立 Registry。
+`RegisterCodecs` 独立注册 `meta.Time` 与 `resource.Quantity` 的专用 codec，默认构造依次
+调用两者。调用方按相同顺序创建并注册默认值，再通过 `RegisterCodec` 同时注册某个类型的
+编码和解码，通过嵌入的 Registry 接入驱动。首次使用前完成全部注册，生命周期由实例持有。
 
 构造期间打开客户端后，collection 或索引初始化失败会先断开该客户端。构造成功的实例
 由调用方通过 `Close(ctx)` 释放。Watch 依赖 replica set 或 sharded cluster 提供的
