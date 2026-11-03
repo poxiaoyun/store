@@ -203,6 +203,35 @@ MongoDB 消费需要 replica set 或 sharded cluster 提供 change stream。通�
 
 ## 缓存
 
+`inmemory.NewCacheStore(source, options)` 为已注册资源构造对象查询缓存：
+
+```go
+options := inmemory.CacheStoreOptions{
+    Resources: []store.Object{&Rule{}},
+}
+cached, err := inmemory.NewCacheStore(source, options)
+```
+
+`CacheStoreOptions.Resources` 指定需要同步的资源；空配置只委托权威操作。
+source 须支持 initial Watch，并使用未附加 Scope 的根句柄。缓存同步所选资源的全部 Scope，
+查询按请求的 Scope 过滤。MongoDB、etcd 和内存 Store
+均可作为来源。构造后由应用运行 `Run(ctx)`，结束时调用 `Close()` 等待缓存任务退出；
+应用在后台启动 Run 后，先调用 `WaitSync(ctx)` 等待所有所选资源完成同步，再开始缓存查询。
+底层 Store 由创建方关闭。每个副本独立运行同步任务。
+
+默认 Get/List 委托权威 Store；计价等允许传播延迟的查询显式传入
+`store.WithResourceVersion(0)`，使用相同的 selector、Scope、排序、Limit 和续传选项。
+首次同步及断线重建期间，缓存读取立即返回 ServiceUnavailable；需要等待恢复时显式调用
+`WaitSync(ctx)`。等待可由调用 Context 取消，缓存关闭时返回 `io.ErrClosedPipe`。
+WaitSync 成功后仍可能发生断线，调用方需处理查询时的 ServiceUnavailable。
+正数 ResourceVersion 或未注册资源的缓存读取返回 Unsupported。
+Count、Watch、Status 和写入委托来源；写入成功与缓存可见之间允许延迟。
+
+本地索引使用来源 Schema 声明的单列和复合索引，支持等值前缀、范围及兼容排序的
+正反向扫描。Scope、字段、标签和搜索条件均在分页前执行。无法安全利用索引的条件
+继续过滤，不兼容的排序显式执行；索引不改变查询结果。
+查询返回独立对象，调用方修改结果不会改变缓存。
+
 根包提供 `Cache[T]`、`LoadingCache[T]`、窗口计数及限流接口。`inmemory.NewCache[T](capacity)` 创建容量有界的 LRU；Set 的 TTL 为零表示不过期，负值非法。`LoadingCache[T]` 嵌入 `Cache[T]`，保留 Get、Set、Delete 的原始合同；`NewLoadingCache(backend, ttl, loader)` 配置回源及其缓存 TTL，`GetOrLoad` 合并同一 key 的并发加载，失败结果不缓存，成功回源后的缓存写入失败仅记日志。首个调用者控制共享加载的 ctx，各等待者可独立取消等待。缓存值及其引用内容保持不可变。
 
 ## 资源释放

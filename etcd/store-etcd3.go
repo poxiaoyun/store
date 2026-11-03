@@ -141,7 +141,7 @@ func validateSchema(schema *store.Schema) error {
 			return err
 		}
 		for _, index := range definition.Indexes {
-			if !definition.IsPrimaryIndex(index) {
+			if index.Unique && !definition.IsPrimaryIndex(index) {
 				return fmt.Errorf("etcd store does not support resource %q index %q", resource, index.Name)
 			}
 		}

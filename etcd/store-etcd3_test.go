@@ -302,10 +302,10 @@ func TestListAppliesUnindexedFieldRequirements(t *testing.T) {
 	}
 }
 
-func TestValidateSchemaRejectsSecondaryIndex(t *testing.T) {
+func TestValidateSchemaRejectsUniqueSecondaryIndex(t *testing.T) {
 	schema := store.NewSchema()
 	if err := schema.Register(&indexedObject{}, store.ResourceSchema{
-		Indexes: []store.Index{{Fields: []string{"email"}}},
+		Indexes: []store.Index{{Fields: []string{"email"}, Unique: true}},
 	}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}

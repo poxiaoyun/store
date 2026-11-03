@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kubejson "sigs.k8s.io/json"
 	"xiaoshiai.cn/common/meta"
+	"xiaoshiai.cn/store/selector"
 )
 
 var _ Object = &Unstructured{}
@@ -442,18 +443,18 @@ func jsonPath(fields []string) string {
 	return "." + strings.Join(fields, ".")
 }
 
+// ToUnstructured copies an object's JSON representation, honoring field codecs
+// and preserving integer precision.
 func ToUnstructured(obj Object) (*Unstructured, error) {
-	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
-	if err != nil {
+	result := &Unstructured{}
+	if err := CopyObject(obj, result); err != nil {
 		return nil, err
 	}
-	u := &Unstructured{Object: m}
-	return u, nil
+	return result, nil
 }
 
-func FromUnstructured(u *Unstructured, obj Object) error {
-	return runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, obj)
-}
+// FromUnstructured decodes the object representation using the target's JSON codecs.
+func FromUnstructured(u *Unstructured, obj Object) error { return CopyObject(u, obj) }
 
 // UnmarshalJSON preserves integer facts as int64 and fractions as float64,
 // retaining the numeric types accepted by Kubernetes unstructured conversion.
@@ -516,11 +517,11 @@ func CompareDataFieldSort(a, b *Unstructured, sort meta.SortField) int {
 	}
 	av, ok := GetNestedField(a.Object, strings.Split(sort.Field, ".")...)
 	if !ok {
-		av = ""
+		av = nil
 	}
 	bv, ok := GetNestedField(b.Object, strings.Split(sort.Field, ".")...)
 	if !ok {
-		bv = ""
+		bv = nil
 	}
 	switch sort.Direction {
 	case meta.SortDirectionAsc:
@@ -532,41 +533,27 @@ func CompareDataFieldSort(a, b *Unstructured, sort meta.SortField) int {
 	}
 }
 
+// CompareField orders scalar fields, with nil before present values. Strings
+// retain lexical order; numeric and typed time values use their value semantics.
 func CompareField(a, b any) int {
-	switch av := a.(type) {
-	case string:
-		bv, ok := b.(string)
-		if !ok {
+	a, _ = selector.ComparisonValue(a)
+	b, _ = selector.ComparisonValue(b)
+	if a == nil {
+		if b == nil {
 			return 0
 		}
-		return strings.Compare(av, bv)
-	case int64:
-		bv, ok := b.(int64)
-		if !ok {
-			return 0
-		}
-		if av == bv {
-			return 0
-		}
-		if av < bv {
-			return -1
-		}
-		return 1
-	case float64:
-		bv, ok := b.(float64)
-		if !ok {
-			return 0
-		}
-		if av == bv {
-			return 0
-		}
-		if av < bv {
-			return -1
-		}
-		return 1
-	default:
-		return 0
+		return -1
 	}
+	if b == nil {
+		return 1
+	}
+	if av, ok := a.(string); ok {
+		if bv, ok := b.(string); ok {
+			return strings.Compare(av, bv)
+		}
+	}
+	comparison, _ := selector.CompareValues(a, b)
+	return comparison
 }
 
 func ParseSorts(sort string) []meta.SortField {

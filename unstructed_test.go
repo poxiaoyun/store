@@ -3,6 +3,7 @@ package store_test
 import (
 	"encoding/json"
 	"math"
+	"strconv"
 	"testing"
 
 	"xiaoshiai.cn/store"
@@ -35,5 +36,46 @@ func TestUnstructuredJSONPreservesInt64AcrossTypedConversion(t *testing.T) {
 	}
 	if _, ok := object.Object["ratio"].(float64); !ok {
 		t.Fatalf("fraction fact has non-unstructured numeric type %T", object.Object["ratio"])
+	}
+}
+
+type stringNumber int64
+
+func (n stringNumber) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strconv.FormatInt(int64(n), 10))
+}
+func (n *stringNumber) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return err
+	}
+	*n = stringNumber(parsed)
+	return nil
+}
+
+type encodedObject struct {
+	store.ObjectMeta `json:",inline"`
+	Value            stringNumber `json:"value"`
+}
+
+func TestObjectConversionHonorsScalarCodecs(t *testing.T) {
+	original := &encodedObject{Value: 9007199254740993}
+	portable, err := store.ToUnstructured(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portable.Object["value"] != "9007199254740993" {
+		t.Fatal(portable)
+	}
+	result := &encodedObject{}
+	if err := store.FromUnstructured(portable, result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Value != original.Value {
+		t.Fatal(result)
 	}
 }

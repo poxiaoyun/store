@@ -30,7 +30,12 @@
 POSTGRESQL_INTEGRATION=1 go test ./sql/ -run TestPostgreSQLStoreConformance -count=1
 MYSQL_INTEGRATION=1 go test ./sql/ -run TestMySQLStoreConformance -count=1
 MONGODB_INTEGRATION=1 go test ./mongo/ -run TestStoreConformance -count=1
+MONGODB_INTEGRATION=1 go test -race ./inmemory/ -run TestCacheBackends -count=1
 ```
+
+对象缓存的 `TestCacheBackends` 使用内存 Store、嵌入式 etcd 和真实 MongoDB 作为来源，
+验证 Watch 同步、查询与删除生命周期。MongoDB 用例遵循同一环境变量门控。
+该套件通过中断 Watch 流验证重建；数据库进程重启与实际网络故障需要独立验证。
 
 Fixture 的 Capabilities 必须是测试维护的独立预期，不能从被测实现的
 `Capabilities()` 方法复制。测试同时检查根 Store 与派生 Scope 的三项能力声明。

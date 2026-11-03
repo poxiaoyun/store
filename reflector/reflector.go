@@ -3,6 +3,7 @@ package reflector
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -47,7 +48,8 @@ func (f ReflectorHandlerFuncs[T]) Invalidate(ctx context.Context, cause error) {
 // and ordered Apply calls. A Reflector may be run once.
 type Reflector[T any] struct {
 	storage store.Store
-	list    *store.List[T]
+	list    store.ObjectList
+	decode  func(store.Object) (*T, error)
 	options []store.WatchOption
 
 	synced chan struct{}
@@ -55,7 +57,19 @@ type Reflector[T any] struct {
 
 // NewReflector constructs a Reflector for list's resource and selectors.
 func NewReflector[T any](storage store.Store, list *store.List[T], options ...store.WatchOption) *Reflector[T] {
-	return &Reflector[T]{storage: storage, list: list, options: options, synced: make(chan struct{})}
+	return &Reflector[T]{
+		storage: storage,
+		list:    list,
+		options: options,
+		synced:  make(chan struct{}),
+		decode: func(object store.Object) (*T, error) {
+			typed, ok := any(object).(*T)
+			if !ok {
+				return nil, fmt.Errorf("watch event object has type %T, want *T", object)
+			}
+			return typed, nil
+		},
+	}
 }
 
 // Synced closes after the first authoritative snapshot has been published.
@@ -66,28 +80,49 @@ func (r *Reflector[T]) Synced() <-chan struct{} {
 // Run watches until ctx is canceled, resuming from a positive global
 // checkpoint when possible and rebuilding from an initial Watch otherwise.
 func (r *Reflector[T]) Run(ctx context.Context, handler ReflectorHandler[T]) error {
-	if !r.storage.Capabilities().
-		Watch {
+	return r.run(ctx, handler, false)
+}
+
+// RunWithRebuild invalidates on every stream interruption and publishes a new
+// initial snapshot before making state available again. It runs once until canceled.
+func (r *Reflector[T]) RunWithRebuild(ctx context.Context, handler ReflectorHandler[T]) error {
+	return r.run(ctx, handler, true)
+}
+
+func (r *Reflector[T]) run(ctx context.Context, handler ReflectorHandler[T], rebuild bool) error {
+	if !r.storage.Capabilities().Watch {
 		return commonerrors.NewUnsupported("reflector requires Store Watch support")
 	}
 
 	checkpoint := int64(0)
 	valid := false
 	firstSync := true
-	return retry.OnError(ctx, func(ctx context.Context) error {
+	var terminal error
+	err := retry.OnError(ctx, func(ctx context.Context) error {
 		err := r.watch(ctx, handler, &checkpoint, &valid, &firstSync)
 		if ctx.Err() != nil {
 			return nil
 		}
-		if commonerrors.IsResourceExpired(err) || checkpoint == 0 {
+		if rebuild || commonerrors.IsResourceExpired(err) || checkpoint == 0 {
 			checkpoint = 0
 			if valid {
 				handler.Invalidate(ctx, err)
 				valid = false
 			}
 		}
+		if commonerrors.IsUnsupported(err) || commonerrors.IsCode(err, 400) {
+			terminal = err
+			return nil
+		}
 		return err
 	})
+	if terminal != nil {
+		return terminal
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 func (r *Reflector[T]) watch(
@@ -144,9 +179,9 @@ func (r *Reflector[T]) watch(
 				continue
 			}
 
-			object, ok := any(event.Object).(*T)
-			if !ok {
-				return fmt.Errorf("watch event object has type %T, want *T", event.Object)
+			object, err := r.decode(event.Object)
+			if err != nil {
+				return err
 			}
 			if initial {
 				if err := applyReflectorSnapshotEvent(staging, event.Type, object); err != nil {
@@ -194,4 +229,27 @@ func ReflectorObjectKey(object store.Object) string {
 	key.WriteByte('/')
 	key.WriteString(strconv.Quote(object.GetID()))
 	return key.String()
+}
+
+// NewResourceReflector observes a registered resource using its schema's Go type
+// for backend decoding, then publishes its portable object representation.
+func NewResourceReflector(storage store.Store, resource string, options ...store.WatchOption) (*Reflector[store.Unstructured], error) {
+	object, err := storage.Schema().NewObject(resource)
+	if err != nil {
+		return nil, err
+	}
+	items := reflect.New(reflect.SliceOf(reflect.TypeOf(object).Elem())).Interface()
+	list := &resourceList{List: store.List[store.Unstructured]{Resource: resource}, Items: items}
+	return &Reflector[store.Unstructured]{
+		storage: storage,
+		list:    list,
+		options: options,
+		synced:  make(chan struct{}),
+		decode:  store.ToUnstructured,
+	}, nil
+}
+
+type resourceList struct {
+	store.List[store.Unstructured]
+	Items any
 }

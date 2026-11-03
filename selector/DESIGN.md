@@ -25,7 +25,8 @@ Key 或 Values，叶子节点不能携带子 Requirements。
 `None`，不从 operand 数量推断另一种操作符。
 
 值支持 nil、字符串、布尔值、整数、有限浮点数、`time.Time` 和共享的
-`meta.Time`。文本协议中的非 nil operand 保持字符串；求值时数字、布尔值和时间
+`meta.Time`。原生时间包装按瞬间比较，自定义标量通过其 JSON codec 映射为比较值；
+codec 返回 null 时按 nil 处理。文本协议中的非 nil operand 保持字符串；求值时数字、布尔值和时间
 可以与对应的文本表示比较。缺失键只满足 `DoesNotExist`、非空 `NotEquals` 和非空
 `NotIn`。
 
@@ -37,3 +38,6 @@ AND；组合节点使用 `&&`、`||`、`!(...)` 和括号；常量使用 `all()`
 
 外部 selector、对象模型和数据库都是 adapter seam。adapter 可以把表达式编译到
 自己的查询表示，但必须完整保留结构和语义；无法表达时返回其所属模块定义的错误。
+
+存储索引拥有键表示与顺序。查询优化必须保持 selector 的比较语义；无法把某个条件
+无损转换为索引边界时，保留该条件的完整求值。

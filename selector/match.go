@@ -1,13 +1,14 @@
 package selector
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"reflect"
 	"strings"
 	"time"
 
-	"xiaoshiai.cn/common/meta"
+	kubejson "sigs.k8s.io/json"
 )
 
 // RequirementsMatchLabels reports whether labels satisfy every requirement.
@@ -122,6 +123,18 @@ func requirementValueEqual(a, b any) bool {
 }
 
 func compareRequirementValues(a, b any) (int, bool) {
+	var ok bool
+	a, ok = ComparisonValue(a)
+	if !ok {
+		return 0, false
+	}
+	b, ok = ComparisonValue(b)
+	if !ok {
+		return 0, false
+	}
+	if a == nil && b == nil {
+		return 0, true
+	}
 	if timeA, okA := requirementTime(a); okA {
 		if timeB, okB := requirementTime(b); okB {
 			return timeA.Compare(timeB), true
@@ -173,11 +186,11 @@ func requirementBool(value any) (bool, bool) {
 	if !ref.IsValid() {
 		return false, false
 	}
-	switch value := ref.Interface().(type) {
-	case bool:
-		return value, true
-	case string:
-		switch value {
+	switch ref.Kind() {
+	case reflect.Bool:
+		return ref.Bool(), true
+	case reflect.String:
+		switch ref.String() {
 		case "true":
 			return true, true
 		case "false":
@@ -209,17 +222,17 @@ func requirementTime(value any) (time.Time, bool) {
 	switch value := ref.Interface().(type) {
 	case time.Time:
 		return value, true
-	case meta.Time:
-		return value.Time, true
-	case string:
-		parsed, err := time.Parse(time.RFC3339Nano, value)
+	case interface{ UTC() time.Time }:
+		return value.UTC(), true
+	}
+	if ref.Kind() == reflect.String {
+		parsed, err := time.Parse(time.RFC3339Nano, ref.String())
 		if err != nil {
 			return time.Time{}, false
 		}
 		return parsed, true
-	default:
-		return time.Time{}, false
 	}
+	return time.Time{}, false
 }
 
 func requirementNumber(value any) (*big.Rat, bool) {
@@ -304,4 +317,42 @@ func requirementMatchIn(val any, in ...any) bool {
 		}
 	}
 	return false
+}
+
+// CompareValues compares scalar selector operands, including equivalent text
+// representations. The boolean reports whether the operands are comparable.
+func CompareValues(a, b any) (int, bool) { return compareRequirementValues(a, b) }
+
+// ComparisonValue maps a model scalar to its comparison representation. Native
+// times retain instant semantics; custom JSON codecs provide their scalar value.
+// False reports a codec error. Returned references must be treated as immutable.
+func ComparisonValue(value any) (any, bool) {
+	ref := indirectRequirementValue(value)
+	if !ref.IsValid() {
+		return nil, true
+	}
+	marshaler, ok := value.(json.Marshaler)
+	if !ok {
+		marshaler, ok = ref.Interface().(json.Marshaler)
+	}
+	if ok {
+		data, err := marshaler.MarshalJSON()
+		if err != nil {
+			return nil, false
+		}
+		var decoded any
+		if err := kubejson.UnmarshalCaseSensitivePreserveInts(data, &decoded); err != nil {
+			return nil, false
+		}
+		if decoded != nil {
+			if at, ok := requirementTime(value); ok {
+				return at.UTC(), true
+			}
+		}
+		return decoded, true
+	}
+	if ref.Kind() == reflect.String {
+		return ref.String(), true
+	}
+	return ref.Interface(), true
 }
