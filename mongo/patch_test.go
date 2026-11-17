@@ -57,7 +57,7 @@ func TestMongoFieldPatch(t *testing.T) {
 	if got.Balance != 70 || got.Note != "new" || got.Nested == nil || got.Nested.Count != 3 || got.Nested.Keep != "keep" {
 		t.Fatalf("field patch result: %#v", got)
 	}
-	if got.Generation != 2 || got.ResourceVersion != 2 {
+	if got.Generation != 2 || got.ResourceVersion != "2" {
 		t.Fatalf("metadata after field patch: %#v", got)
 	}
 
@@ -75,7 +75,7 @@ func TestMongoFieldPatch(t *testing.T) {
 	if err := storage.Get(t.Context(), object.ID, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Balance != 70 || got.Generation != 2 || got.ResourceVersion != 2 {
+	if got.Balance != 70 || got.Generation != 2 || got.ResourceVersion != "2" {
 		t.Fatalf("failed patch changed the object: %#v", got)
 	}
 
@@ -89,7 +89,7 @@ func TestMongoFieldPatch(t *testing.T) {
 	if err := storage.Get(t.Context(), object.ID, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Generation != 2 || got.ResourceVersion != 3 {
+	if got.Generation != 2 || got.ResourceVersion != "3" {
 		t.Fatalf("no-op set metadata: %#v", got)
 	}
 
@@ -119,10 +119,10 @@ func TestMongoFieldPatch(t *testing.T) {
 		t.Fatalf("unset result: %#v", got)
 	}
 
-	stale := got.ResourceVersion - 1
+	stale := "0"
 	err = storage.Patch(t.Context(), object, store.FieldPatch{Operations: []store.FieldOperation{
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-1")},
-	}}, store.WithPreconditions(store.Preconditions{ResourceVersion: &stale}))
+	}}, store.WithPreconditions(store.Preconditions{ResourceVersion: stale}))
 	if !commonerrors.IsConflict(err) {
 		t.Fatalf("stale precondition: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestMongoFieldPatchConcurrentDebits(t *testing.T) {
 	if err := storage.Get(t.Context(), object.ID, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Balance != 0 || got.Generation != 101 || got.ResourceVersion != 101 {
+	if got.Balance != 0 || got.Generation != 101 || got.ResourceVersion != "101" {
 		t.Fatalf("concurrent debit result: %#v", got)
 	}
 }
@@ -220,7 +220,7 @@ func TestMongoFieldPatchOrderedOverlap(t *testing.T) {
 	if got.Balance != 70 || got.Nested == nil || got.Nested.Count != 7 || got.Nested.Keep != "keep" {
 		t.Fatalf("ordered overlap result: %#v", got)
 	}
-	if got.Generation != 2 || got.ResourceVersion != 2 {
+	if got.Generation != 2 || got.ResourceVersion != "2" {
 		t.Fatalf("ordered overlap metadata: %#v", got)
 	}
 
@@ -270,7 +270,7 @@ func TestMongoFieldPatchExpression(t *testing.T) {
 	if got.Balance != 110 || got.Note != "fallback" {
 		t.Fatalf("expression patch result: %#v", got)
 	}
-	if got.Generation != 2 || got.ResourceVersion != 2 {
+	if got.Generation != 2 || got.ResourceVersion != "2" {
 		t.Fatalf("expression patch metadata: %#v", got)
 	}
 }
@@ -309,7 +309,7 @@ func TestMongoValidateFieldPatch(t *testing.T) {
 }
 
 func TestBuildFieldPatchUpdate(t *testing.T) {
-	classic, err := buildFieldPatchUpdate([]store.FieldOperation{
+	disjoint, err := buildFieldPatchUpdate([]store.FieldOperation{
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-30")},
 		{Op: store.FieldOpSet, Path: "note", Value: "new"},
 		{Op: store.FieldOpUnset, Path: "old"},
@@ -317,12 +317,12 @@ func TestBuildFieldPatchUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, ok := classic.(bson.D)
+	disjointPipeline, ok := disjoint.(mongo.Pipeline)
 	if !ok {
-		t.Fatalf("classic update type: %T", classic)
+		t.Fatalf("disjoint update type: %T", disjoint)
 	}
-	if len(document) != 3 {
-		t.Fatalf("classic update: %#v", document)
+	if len(disjointPipeline) != 4 {
+		t.Fatalf("disjoint pipeline: %#v", disjointPipeline)
 	}
 	generated, err := buildFieldPatchUpdate([]store.FieldOperation{
 		{Op: store.FieldOpInc, Path: "balance", Value: json.Number("-30")},

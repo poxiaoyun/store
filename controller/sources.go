@@ -85,7 +85,7 @@ func (s StoreSource[T]) Run(ctx context.Context, queue TypedQueue[T]) error {
 type TypedWatchEvent[T any] struct {
 	Type            store.WatchEventType
 	Object          T
-	ResourceVersion int64
+	ResourceVersion string
 }
 
 // EventHandler consumes ordered Watch events.

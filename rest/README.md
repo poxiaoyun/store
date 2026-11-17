@@ -57,7 +57,7 @@ selector 转换错误在 HTTP seam 返回 BadRequest。公开 page/size 请求�
 Update 和 Patch 成功响应只确认操作结果，Client 不把响应当作完整对象回填。
 需要最新对象时显式 Get。Create 仍然返回生成的身份和初始元数据。
 
-Update 不清除 ResourceVersion。请求对象携带非零版本时，底层 Store 按其乐观并发契约处理；只有调用方明确传入零值时才执行无条件更新。
+Update 保留 ResourceVersion。请求对象携带非空版本时，底层 Store 按其乐观并发契约处理；空字符串表示无版本条件。
 
 ## Requirement 协议
 

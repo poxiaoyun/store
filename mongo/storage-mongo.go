@@ -365,7 +365,7 @@ func (m *MongoStorage) Create(ctx context.Context, into store.Object, opts ...st
 	}
 	return m.on(ctx, into, false, func(ctx context.Context, col *mongo.Collection, filter bson.D) error {
 		prepareObjectForCreate(into, col.Name(), slices.Clone(m.scopes))
-		into.SetResourceVersion(1)
+		into.SetResourceVersion("1")
 		data, err := m.objectDocument(into)
 		if err != nil {
 			return err
@@ -481,7 +481,11 @@ func (m *MongoStorage) Delete(ctx context.Context, obj store.Object, opts ...sto
 				}
 				return store.CopyObject(current, obj)
 			}
-			current.SetResourceVersion(current.GetResourceVersion() + 1)
+			version, err := nextResourceVersion(current.GetResourceVersion())
+			if err != nil {
+				return err
+			}
+			current.SetResourceVersion(version)
 			data, err := m.objectDocument(current)
 			if err != nil {
 				return err
@@ -1087,7 +1091,7 @@ func (m *MongoStorage) replace(
 	labelRequirements store.Requirements,
 	fieldRequirements store.Requirements,
 	status bool,
-	requestedVersion int64,
+	requestedVersion string,
 	preconditions *store.Preconditions,
 	change func(current, desired store.Object) error,
 ) error {
@@ -1111,8 +1115,8 @@ func (m *MongoStorage) replace(
 			}
 			current.SetResource(col.Name())
 			current.SetScopes(slices.Clone(m.scopes))
-			if requestedVersion != 0 && requestedVersion != current.GetResourceVersion() {
-				return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("resourceVersion %d does not match", requestedVersion))
+			if requestedVersion != "" && requestedVersion != current.GetResourceVersion() {
+				return errors.NewConflict(col.Name(), obj.GetID(), fmt.Errorf("resourceVersion %s does not match", requestedVersion))
 			}
 			if err := store.ValidatePreconditions(current, preconditions); err != nil {
 				return err
@@ -1139,7 +1143,11 @@ func (m *MongoStorage) replace(
 				}
 				return store.CopyObject(desired, obj)
 			}
-			desired.SetResourceVersion(current.GetResourceVersion() + 1)
+			version, err := nextResourceVersion(current.GetResourceVersion())
+			if err != nil {
+				return err
+			}
+			desired.SetResourceVersion(version)
 			data, err := m.objectDocument(desired)
 			if err != nil {
 				return err

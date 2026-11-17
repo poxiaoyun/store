@@ -93,7 +93,7 @@ func list(t testing.TB, s store.Store, opts ...store.ListOption) []rule {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	result := &store.List[rule]{}
-	if err := s.List(ctx, result, append(opts, store.WithResourceVersion(0))...); err != nil {
+	if err := s.List(ctx, result, append(opts, store.WithResourceVersion("0"))...); err != nil {
 		t.Fatal(err)
 	}
 	return result.Items
@@ -168,7 +168,7 @@ func TestCacheBackends(t *testing.T) {
 			pageIDs := []string{}
 			for {
 				if err := second.List(t.Context(), paged,
-					store.WithResourceVersion(0),
+					store.WithResourceVersion("0"),
 					store.WithFieldRequirements(selector.RequirementEqual("service", "svc"), selector.RequirementEqual("subject", "meter"), selector.RequirementLessThanOrEqual("start", at.Add(2*time.Hour))),
 					store.WithSort("start-,creationTimestamp-,id-"), store.WithContinueLimit(paged.Continue, 1)); err != nil {
 					t.Fatal(err)
@@ -184,12 +184,12 @@ func TestCacheBackends(t *testing.T) {
 				t.Fatal(pageIDs)
 			}
 			got := &rule{}
-			if err := second.Get(t.Context(), base.ID, got, store.WithResourceVersion(0)); err != nil {
+			if err := second.Get(t.Context(), base.ID, got, store.WithResourceVersion("0")); err != nil {
 				t.Fatal(err)
 			}
 			got.Labels["region"] = "changed"
 			got.Values[0] = "changed"
-			if err := second.Get(t.Context(), base.ID, got, store.WithResourceVersion(0)); err != nil {
+			if err := second.Get(t.Context(), base.ID, got, store.WithResourceVersion("0")); err != nil {
 				t.Fatal(err)
 			}
 			if got.Labels["region"] != "east" || got.Values[0] != "original" || got.ResourceVersion != base.ResourceVersion || got.UID != base.UID || !got.CreationTimestamp.Equal(&base.CreationTimestamp) {
@@ -325,7 +325,7 @@ func TestSnapshotAndRebuild(t *testing.T) {
 	c := startCache(t, upstream, &rule{})
 	<-upstream.opened
 	obj := func(id, subject string) *rule {
-		return &rule{ObjectMeta: store.ObjectMeta{ID: id, UID: id, Resource: "rules", ResourceVersion: 5}, Service: "svc", Subject: subject}
+		return &rule{ObjectMeta: store.ObjectMeta{ID: id, UID: id, Resource: "rules", ResourceVersion: "5"}, Service: "svc", Subject: subject}
 	}
 	first.events <- store.WatchEvent{Type: store.WatchEventCreate, Object: obj("a", "old")}
 	first.events <- store.WatchEvent{Type: store.WatchEventCreate, Object: obj("b", "gone")}
@@ -338,7 +338,7 @@ func TestSnapshotAndRebuild(t *testing.T) {
 		t.Fatalf("WaitSync returned before Bookmark: %v", err)
 	}
 	readctx, stop := context.WithTimeout(t.Context(), time.Second)
-	if err := c.List(readctx, &store.List[rule]{}, store.WithResourceVersion(0)); !commonerrors.IsCode(err, 503) {
+	if err := c.List(readctx, &store.List[rule]{}, store.WithResourceVersion("0")); !commonerrors.IsCode(err, 503) {
 		t.Fatalf("unavailable cache read: %v", err)
 	}
 	stop()
@@ -346,9 +346,9 @@ func TestSnapshotAndRebuild(t *testing.T) {
 	if err := c.List(t.Context(), &store.List[rule]{}); err != nil {
 		t.Fatal(err)
 	}
-	first.events <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: 50}
+	first.events <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: "50"}
 	waitSync(t, c)
-	if got := list(t, c, store.WithFieldRequirements(selector.RequirementEqual("service", "svc"), selector.RequirementEqual("subject", "new"))); len(got) != 1 || got[0].UID != "a" || got[0].ResourceVersion != 5 {
+	if got := list(t, c, store.WithFieldRequirements(selector.RequirementEqual("service", "svc"), selector.RequirementEqual("subject", "new"))); len(got) != 1 || got[0].UID != "a" || got[0].ResourceVersion != "5" {
 		t.Fatal(got)
 	}
 	close(first.events)
@@ -360,7 +360,7 @@ func TestSnapshotAndRebuild(t *testing.T) {
 		t.Fatalf("WaitSync returned before rebuild: %v", err)
 	}
 	readctx, stop = context.WithTimeout(t.Context(), time.Second)
-	if err := c.List(readctx, &store.List[rule]{}, store.WithResourceVersion(0)); !commonerrors.IsCode(err, 503) {
+	if err := c.List(readctx, &store.List[rule]{}, store.WithResourceVersion("0")); !commonerrors.IsCode(err, 503) {
 		t.Fatalf("unavailable cache read: %v", err)
 	}
 	stop()
@@ -374,7 +374,7 @@ func TestSnapshotAndRebuild(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Get(t.Context(), "a", &rule{}, store.WithResourceVersion(0)); !errors.Is(err, io.ErrClosedPipe) {
+	if err := c.Get(t.Context(), "a", &rule{}, store.WithResourceVersion("0")); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatal(err)
 	}
 }
@@ -463,7 +463,7 @@ func TestCoverageAndPagination(t *testing.T) {
 	c := startCache(t, source, &rule{})
 	waitSync(t, c)
 	view := c.Scope(store.Scope{Resource: "tenant", Name: "a/b"})
-	options := []store.ListOption{store.WithResourceVersion(0), store.WithFieldRequirements(selector.RequirementEqual("service", "svc"), selector.RequirementEqual("subject", "meter")), store.WithLabelRequirementsFromSet(map[string]string{"region": "east"}), store.WithSort("id-"), store.WithLimit(1)}
+	options := []store.ListOption{store.WithResourceVersion("0"), store.WithFieldRequirements(selector.RequirementEqual("service", "svc"), selector.RequirementEqual("subject", "meter")), store.WithLabelRequirementsFromSet(map[string]string{"region": "east"}), store.WithSort("id-"), store.WithLimit(1)}
 	result := &store.List[rule]{}
 	ids := []string{}
 	for {
@@ -507,16 +507,18 @@ func TestReadIntentAndClose(t *testing.T) {
 	}
 	readctx, stop := context.WithTimeout(t.Context(), time.Second)
 	defer stop()
-	if err := c.Get(readctx, object.ID, &rule{}, store.WithResourceVersion(0)); !commonerrors.IsCode(err, 503) {
+	if err := c.Get(readctx, object.ID, &rule{}, store.WithResourceVersion("0")); !commonerrors.IsCode(err, 503) {
 		t.Fatalf("unsynced cached Get: %v", err)
 	}
-	if err := c.Get(t.Context(), object.ID, &rule{}, store.WithResourceVersion(1)); !commonerrors.IsUnsupported(err) {
-		t.Fatalf("positive freshness: %v", err)
+	// A version the cache cannot prove is delegated to the authority rather
+	// than rejected or served stale.
+	if err := c.Get(t.Context(), object.ID, &rule{}, store.WithResourceVersion("1")); err != nil {
+		t.Fatalf("versioned Get: %v", err)
 	}
-	if err := c.List(t.Context(), &store.List[rule]{}, store.WithResourceVersion(1)); !commonerrors.IsUnsupported(err) {
-		t.Fatalf("positive freshness: %v", err)
+	if err := c.List(t.Context(), &store.List[rule]{}, store.WithResourceVersion("1")); err != nil {
+		t.Fatalf("versioned List: %v", err)
 	}
-	if err := c.List(t.Context(), &store.List[store.Unstructured]{Resource: "uncached"}, store.WithResourceVersion(0)); !commonerrors.IsUnsupported(err) {
+	if err := c.List(t.Context(), &store.List[store.Unstructured]{Resource: "uncached"}, store.WithResourceVersion("0")); !commonerrors.IsUnsupported(err) {
 		t.Fatalf("unregistered resource: %v", err)
 	}
 	done := make(chan error, 1)
@@ -581,7 +583,7 @@ func TestWaitSyncAllResources(t *testing.T) {
 	second.events <- store.WatchEvent{Type: store.WatchEventBookmark}
 	waitSync(t, c)
 	for _, result := range []store.ObjectList{&store.List[rule]{}, &store.List[item]{}} {
-		if err := c.List(t.Context(), result, store.WithResourceVersion(0)); err != nil {
+		if err := c.List(t.Context(), result, store.WithResourceVersion("0")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -597,13 +599,13 @@ func TestRepeatedSnapshots(t *testing.T) {
 	watches := []*scriptWatch{}
 	for cycle := range 4 {
 		<-upstream.opened
-		if err := cache.List(t.Context(), &store.List[rule]{}, store.WithResourceVersion(0)); !commonerrors.IsCode(err, 503) {
+		if err := cache.List(t.Context(), &store.List[rule]{}, store.WithResourceVersion("0")); !commonerrors.IsCode(err, 503) {
 			t.Fatalf("cycle %d exposed incomplete state: %v", cycle, err)
 		}
 		watch := &scriptWatch{events: make(chan store.WatchEvent, 4)}
 		watches = append(watches, watch)
 		upstream.watches <- watch
-		object := &rule{ObjectMeta: store.ObjectMeta{ID: "same", UID: fmt.Sprint(cycle), ResourceVersion: int64(cycle + 1)}, Service: "svc", Subject: fmt.Sprint(cycle)}
+		object := &rule{ObjectMeta: store.ObjectMeta{ID: "same", UID: fmt.Sprint(cycle), ResourceVersion: fmt.Sprint(cycle + 1)}, Service: "svc", Subject: fmt.Sprint(cycle)}
 		switch cycle {
 		case 0:
 			// Losing the stream before Bookmark discards the entire staged snapshot.
@@ -616,7 +618,7 @@ func TestRepeatedSnapshots(t *testing.T) {
 		case 3:
 			// An empty replacement must remove both objects and indexed values.
 		}
-		watch.events <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: 1000}
+		watch.events <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: "1000"}
 		waitSync(t, cache)
 		got := list(t, cache, store.WithFieldRequirements(selector.RequirementEqual("service", "svc")))
 		if cycle < 3 {
@@ -684,11 +686,11 @@ func TestCacheResourceRecovery(t *testing.T) {
 	waitSync(t, cache)
 	close(first.events)
 	<-rules.opened
-	if err := cache.Get(t.Context(), "missing", &rule{}, store.WithResourceVersion(0)); !commonerrors.IsCode(err, 503) {
+	if err := cache.Get(t.Context(), "missing", &rule{}, store.WithResourceVersion("0")); !commonerrors.IsCode(err, 503) {
 		t.Fatalf("disconnected resource: %v", err)
 	}
 	retained := &item{}
-	if err := cache.Get(t.Context(), "peer", retained, store.WithResourceVersion(0)); err != nil {
+	if err := cache.Get(t.Context(), "peer", retained, store.WithResourceVersion("0")); err != nil {
 		t.Fatal(err)
 	}
 	if retained.Code != "retained" {
@@ -743,8 +745,10 @@ func TestCacheReadsFollowIntent(t *testing.T) {
 	upstream.watches <- watch
 	cache := startCache(t, upstream, &rule{})
 	<-upstream.opened
-	watch.events <- store.WatchEvent{Type: store.WatchEventCreate, Object: original}
-	watch.events <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: 999}
+	snapshot := *original
+	snapshot.ResourceVersion = "source/version/one"
+	watch.events <- store.WatchEvent{Type: store.WatchEventCreate, Object: &snapshot}
+	watch.events <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: "999"}
 	waitSync(t, cache)
 	// Hold propagation while writes commit to the source.
 	if err := cache.Patch(t.Context(), &rule{ObjectMeta: store.ObjectMeta{ID: "rule"}}, store.FieldPatch{Operations: []store.FieldOperation{{Op: store.FieldOpSet, Path: "subject", Value: "new"}}}); err != nil {
@@ -765,14 +769,14 @@ func TestCacheReadsFollowIntent(t *testing.T) {
 		t.Fatalf("default List did not read source: %+v", management.Items)
 	}
 	cached := list(t, cache, store.WithFieldRequirements(selector.RequirementEqual("service", "svc"), selector.RequirementEqual("subject", "old")))
-	if len(cached) != 1 || cached[0].ResourceVersion != original.ResourceVersion {
+	if len(cached) != 1 || cached[0].ResourceVersion != snapshot.ResourceVersion {
 		t.Fatalf("cache changed before Watch propagation: %+v", cached)
 	}
 	cached[0].Labels["region"] = "changed"
 	cached[0].Values[0] = "changed"
 	cached[0].Subject = "changed"
 	got := &rule{}
-	if err := cache.Get(t.Context(), "rule", got, store.WithResourceVersion(0)); err != nil {
+	if err := cache.Get(t.Context(), "rule", got, store.WithResourceVersion("0")); err != nil {
 		t.Fatal(err)
 	}
 	if got.Subject != "old" || got.Labels["region"] != "east" || got.Values[0] != "original" {
@@ -799,7 +803,7 @@ func TestCacheReadsFollowIntent(t *testing.T) {
 	if err := cache.Get(t.Context(), "rule", &rule{}); !commonerrors.IsNotFound(err) {
 		t.Fatalf("default Get after deletion: %v", err)
 	}
-	if err := cache.Get(t.Context(), "rule", &rule{}, store.WithResourceVersion(0)); err != nil {
+	if err := cache.Get(t.Context(), "rule", &rule{}, store.WithResourceVersion("0")); err != nil {
 		t.Fatalf("cached Get before propagation: %v", err)
 	}
 	watch.events <- store.WatchEvent{Type: store.WatchEventDelete, Object: authoritative}

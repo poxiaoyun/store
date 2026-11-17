@@ -61,41 +61,44 @@ func WithID(id string) IDOption {
 	return IDOption(id)
 }
 
-// ResourceVersionOption selects a read version or write precondition.
-type ResourceVersionOption int64
+// ResourceVersionOption selects a read version, a Watch position, or a Delete
+// precondition according to the target operation. The value is opaque: callers
+// store and return it, never parse it. An empty value means "no version".
+type ResourceVersionOption string
 
 // ApplyToGet sets the requested Get version.
 func (option ResourceVersionOption) ApplyToGet(options *GetOptions) {
-	options.ResourceVersion = ptr.To(int64(option))
+	options.ResourceVersion = string(option)
 }
 
 // ApplyToList sets or clears the requested List version.
 func (option ResourceVersionOption) ApplyToList(options *ListOptions) {
-	resourceVersion := int64(option)
-	if resourceVersion < 0 {
-		options.ResourceVersion = nil
-		return
-	}
-	options.ResourceVersion = ptr.To(resourceVersion)
+	options.ResourceVersion = string(option)
 }
 
-// ApplyToWatch sets the Watch checkpoint.
+// ApplyToWatch sets the Watch position. An empty value starts at the current
+// end of the stream.
 func (option ResourceVersionOption) ApplyToWatch(options *WatchOptions) {
-	options.ResourceVersion = ptr.To(int64(option))
+	options.ResourceVersion = string(option)
 }
 
 // ApplyToDelete sets the Delete resource-version precondition.
 func (option ResourceVersionOption) ApplyToDelete(options *DeleteOptions) {
+	resourceVersion := string(option)
+	if resourceVersion == "" {
+		return
+	}
 	if options.Preconditions == nil {
 		options.Preconditions = &Preconditions{}
 	}
-	options.Preconditions.ResourceVersion = ptr.To(int64(option))
+	options.Preconditions.ResourceVersion = resourceVersion
 }
 
-// WithResourceVersion selects a read version, a Watch checkpoint, or a Delete
-// precondition according to the target operation. For List, a negative value
-// clears the version and reads from the backend.
-func WithResourceVersion(resourceVersion int64) ResourceVersionOption {
+// WithResourceVersion selects a read version, a Watch position, or a Delete
+// precondition according to the target operation. The value is opaque: empty
+// means unset, "0" means any version for reads, and any other value is an exact
+// position or version condition.
+func WithResourceVersion(resourceVersion string) ResourceVersionOption {
 	return ResourceVersionOption(resourceVersion)
 }
 
@@ -252,9 +255,9 @@ func WithFields(fields ...string) FieldsOption {
 // PreconditionsOption overlays present Get, Patch or Delete preconditions.
 type PreconditionsOption Preconditions
 
-// ApplyToGet overlays non-nil precondition fields.
+// ApplyToGet overlays supplied precondition fields.
 func (option PreconditionsOption) ApplyToGet(options *GetOptions) {
-	if option.UID == nil && option.ResourceVersion == nil {
+	if option.UID == nil && option.ResourceVersion == "" {
 		return
 	}
 	if options.Preconditions == nil {
@@ -263,14 +266,14 @@ func (option PreconditionsOption) ApplyToGet(options *GetOptions) {
 	if option.UID != nil {
 		options.Preconditions.UID = option.UID
 	}
-	if option.ResourceVersion != nil {
+	if option.ResourceVersion != "" {
 		options.Preconditions.ResourceVersion = option.ResourceVersion
 	}
 }
 
-// ApplyToPatch overlays non-nil precondition fields.
+// ApplyToPatch overlays supplied precondition fields.
 func (option PreconditionsOption) ApplyToPatch(options *PatchOptions) {
-	if option.UID == nil && option.ResourceVersion == nil {
+	if option.UID == nil && option.ResourceVersion == "" {
 		return
 	}
 	if options.Preconditions == nil {
@@ -279,14 +282,14 @@ func (option PreconditionsOption) ApplyToPatch(options *PatchOptions) {
 	if option.UID != nil {
 		options.Preconditions.UID = option.UID
 	}
-	if option.ResourceVersion != nil {
+	if option.ResourceVersion != "" {
 		options.Preconditions.ResourceVersion = option.ResourceVersion
 	}
 }
 
-// ApplyToDelete overlays non-nil precondition fields.
+// ApplyToDelete overlays supplied precondition fields.
 func (option PreconditionsOption) ApplyToDelete(options *DeleteOptions) {
-	if option.UID == nil && option.ResourceVersion == nil {
+	if option.UID == nil && option.ResourceVersion == "" {
 		return
 	}
 	if options.Preconditions == nil {
@@ -295,7 +298,7 @@ func (option PreconditionsOption) ApplyToDelete(options *DeleteOptions) {
 	if option.UID != nil {
 		options.Preconditions.UID = option.UID
 	}
-	if option.ResourceVersion != nil {
+	if option.ResourceVersion != "" {
 		options.Preconditions.ResourceVersion = option.ResourceVersion
 	}
 }

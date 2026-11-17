@@ -2,11 +2,11 @@ package rest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +38,14 @@ type CountResponse struct {
 	Count int `json:"count"`
 }
 
+// watchPayload is one streamed Watch event. The object and the stream position
+// travel together so a client can resume even though they are distinct values.
+type watchPayload struct {
+	ResourceVersion string          `json:"resourceVersion,omitempty"`
+	Object          json.RawMessage `json:"object,omitempty"`
+	Message         string          `json:"message,omitempty"`
+}
+
 // listResponse is the List payload: the Store read result plus the protocol
 // echo of the caller's pagination request. The Store owns only the read result,
 // so the adapter restores the protocol fields from the request.
@@ -62,6 +70,12 @@ func (s *Server) List(w http.ResponseWriter, r *http.Request) {
 	s.on(w, r, func(ctx context.Context, ref store.ResourcedObjectReference) (any, error) {
 		log := log.FromContext(ctx)
 		if ref.ID == "" {
+			// The Store contract pins each page to one snapshot through Continue,
+			// so it does not implement the Kubernetes resourceVersionMatch modes.
+			// Ignoring the parameter would silently weaken the caller's request.
+			if r.URL.Query().Has("resourceVersionMatch") {
+				return nil, errors.NewBadRequest("resourceVersionMatch is not supported")
+			}
 			listOptions, err := ListOptionsFromRequest(r)
 			if err != nil {
 				return nil, err
@@ -75,11 +89,7 @@ func (s *Server) List(w http.ResponseWriter, r *http.Request) {
 				listOptions = append(listOptions, store.WithOffset(offset))
 			}
 			if resourceVersion := api.Query(r, "resourceVersion", ""); resourceVersion != "" {
-				parsed, err := strconv.ParseInt(resourceVersion, 10, 64)
-				if err != nil {
-					return nil, errors.NewBadRequest("resourceVersion must be an integer")
-				}
-				listOptions = append(listOptions, store.WithResourceVersion(parsed))
+				listOptions = append(listOptions, store.WithResourceVersion(resourceVersion))
 			}
 			if fields := api.Query(r, "fields", ""); fields != "" {
 				listOptions = append(listOptions, store.WithFields(strings.Split(fields, ",")...))
@@ -124,21 +134,36 @@ func (s *Server) List(w http.ResponseWriter, r *http.Request) {
 				}
 				defer watcher.Stop()
 
-				ssew := api.NewSSEWriter[any](w)
+				ssew := api.NewSSEWriter[watchPayload](w)
+				// The subscription is effective once the response starts. Flush
+				// now so a watch with no pending events does not leave the client
+				// waiting for its first event to learn the stream is open.
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
 				for {
 					select {
 					case <-ctx.Done():
 						return nil, nil
 					case event, ok := <-watcher.Events():
 						if !ok {
-							ssew.Encode("error", fmt.Errorf("watcher closed"))
+							ssew.Encode("error", watchPayload{Message: "watcher closed"})
 							return nil, nil
 						}
 						if event.Error != nil {
-							ssew.Encode("error", event.Error)
+							ssew.Encode("error", watchPayload{Message: event.Error.Error()})
 							return nil, nil
 						}
-						if err := ssew.Encode(string(event.Type), event.Object); err != nil {
+						payload := watchPayload{ResourceVersion: event.ResourceVersion}
+						if event.Object != nil {
+							raw, err := json.Marshal(event.Object)
+							if err != nil {
+								log.Error(err, "encode event object")
+								return nil, nil
+							}
+							payload.Object = raw
+						}
+						if err := ssew.Encode(string(event.Type), payload); err != nil {
 							log.Error(err, "write event")
 							return nil, nil
 						}
@@ -168,11 +193,7 @@ func (s *Server) List(w http.ResponseWriter, r *http.Request) {
 				options = append(options, store.WithFieldRequirements(fieldRequirements...))
 			}
 			if resourceVersion := api.Query(r, "resourceVersion", ""); resourceVersion != "" {
-				parsed, err := strconv.ParseInt(resourceVersion, 10, 64)
-				if err != nil {
-					return nil, errors.NewBadRequest("resourceVersion must be an integer")
-				}
-				options = append(options, store.WithResourceVersion(parsed))
+				options = append(options, store.WithResourceVersion(resourceVersion))
 			}
 			preconditions, err := decodePreconditions(r)
 			if err != nil {
@@ -362,11 +383,7 @@ func (s *Server) Delete(w http.ResponseWriter, r *http.Request) {
 			options = append(options, store.WithUID(uid[0]))
 		}
 		if resourceVersionProvided {
-			parsed, err := strconv.ParseInt(resourceVersion[0], 10, 64)
-			if err != nil {
-				return nil, errors.NewBadRequest("resourceVersion must be an integer")
-			}
-			options = append(options, store.WithResourceVersion(parsed))
+			options = append(options, store.WithResourceVersion(resourceVersion[0]))
 		}
 		if propagationPolicy := api.Query(r, "propagationPolicy", ""); propagationPolicy != "" {
 			options = append(options, store.WithPropagation(store.DeletionPropagation(propagationPolicy)))
@@ -450,11 +467,7 @@ func decodePreconditions(r *http.Request) (store.Preconditions, error) {
 		conditions.UID = &values[0]
 	}
 	if values, present := query["preconditionResourceVersion"]; present {
-		version, err := strconv.ParseInt(values[0], 10, 64)
-		if err != nil {
-			return store.Preconditions{}, errors.NewBadRequest("preconditionResourceVersion must be an integer")
-		}
-		conditions.ResourceVersion = &version
+		conditions.ResourceVersion = values[0]
 	}
 	return conditions, nil
 }

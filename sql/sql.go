@@ -222,8 +222,11 @@ func (s *Storage) Create(ctx context.Context, in store.Object, options ...store.
 		return err
 	}
 	prepareObjectForCreate(in, resource, s.scopes)
-	in.SetResourceVersion(1)
+	in.SetResourceVersion("1")
 	values := s.core.codec.ToDriverValueMap(in)
+	// resourceVersion stays a numeric column so the adapter can increment it
+	// atomically; only the contract type is opaque.
+	values["resourceVersion"] = int64(1)
 	for _, scope := range s.scopes {
 		values[store.ScopeResourceToFieldName(scope.Resource)] = scope.Name
 	}
@@ -297,24 +300,20 @@ func (s *Storage) patch(ctx context.Context, obj store.Object, patch store.Patch
 		return err
 	}
 	preconditions := opts.Preconditions
-	if value, exists := values["resourceVersion"]; exists {
-		var version int64
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
+	if value, exists := values["resourceVersion"]; exists && value != nil {
+		version, ok := value.(string)
+		if !ok {
+			return errors.NewBadRequest("resourceVersion must be a string")
 		}
-		if err := json.Unmarshal(data, &version); err != nil {
-			return errors.NewBadRequest("resourceVersion must be an integer")
-		}
-		if version != 0 {
+		if version != "" {
 			combined := store.Preconditions{}
 			if preconditions != nil {
 				combined = *preconditions
 			}
-			if combined.ResourceVersion != nil && *combined.ResourceVersion != version {
+			if combined.ResourceVersion != "" && combined.ResourceVersion != version {
 				return errors.NewConflict(obj.GetResource(), obj.GetID(), fmt.Errorf("incompatible version conditions"))
 			}
-			combined.ResourceVersion = &version
+			combined.ResourceVersion = version
 			preconditions = &combined
 		}
 	}
@@ -352,8 +351,8 @@ func (s *Storage) update(ctx context.Context, obj store.Object, status bool, opt
 		values[name] = value.Interface()
 	}
 	var preconditions *store.Preconditions
-	if version := obj.GetResourceVersion(); version != 0 {
-		preconditions = &store.Preconditions{ResourceVersion: &version}
+	if version := obj.GetResourceVersion(); version != "" {
+		preconditions = &store.Preconditions{ResourceVersion: version}
 	}
 	return s.write(ctx, obj, values, false, status, false, opts.LabelRequirements, opts.FieldRequirements, preconditions)
 }
@@ -364,8 +363,12 @@ func (s *Storage) writeWhere(q *QueryState, id string, labels, fields store.Requ
 		return "", err
 	}
 	if preconditions != nil {
-		if preconditions.ResourceVersion != nil {
-			where += " AND " + s.core.dialect.Quote("resourceVersion") + " = " + q.Bind(*preconditions.ResourceVersion)
+		if preconditions.ResourceVersion != "" {
+			version, err := sqlVersion(preconditions.ResourceVersion)
+			if err != nil {
+				return "", err
+			}
+			where += " AND " + s.core.dialect.Quote("resourceVersion") + " = " + q.Bind(version)
 		}
 		if preconditions.UID != nil {
 			where += " AND " + s.core.dialect.Quote("uid") + " = " + q.Bind(*preconditions.UID)
@@ -375,7 +378,7 @@ func (s *Storage) writeWhere(q *QueryState, id string, labels, fields store.Requ
 }
 
 func (s *Storage) writeMiss(ctx context.Context, resource, id string, labels, fields store.Requirements, preconditions *store.Preconditions) error {
-	conditional := len(labels)+len(fields) > 0 || preconditions != nil && (preconditions.UID != nil || preconditions.ResourceVersion != nil)
+	conditional := len(labels)+len(fields) > 0 || preconditions != nil && (preconditions.UID != nil || preconditions.ResourceVersion != "")
 	if !conditional {
 		return errors.NewNotFound(resource, id)
 	}

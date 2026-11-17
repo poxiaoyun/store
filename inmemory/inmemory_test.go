@@ -275,8 +275,8 @@ func TestPatchPersistsChangesAndUpdatesIndexes(t *testing.T) {
 	if created.Email != "new@example.com" || created.Phone != "1234" {
 		t.Fatalf("patched user = %#v", created)
 	}
-	if created.ResourceVersion <= previousVersion {
-		t.Fatalf("resource version = %d, want greater than %d", created.ResourceVersion, previousVersion)
+	if created.ResourceVersion == previousVersion {
+		t.Fatalf("resource version = %q, want a new value after %q", created.ResourceVersion, previousVersion)
 	}
 
 	got := &user{}

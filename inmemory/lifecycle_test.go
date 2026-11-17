@@ -10,7 +10,7 @@ import (
 )
 
 func TestPrepareObjectForCreateOwnsServerMetadata(t *testing.T) {
-	object := &store.ObjectMeta{UID: "caller", ResourceVersion: 7, Generation: 9}
+	object := &store.ObjectMeta{UID: "caller", ResourceVersion: "7", Generation: 9}
 	scopes := []store.Scope{{Resource: "tenants", Name: "acme"}}
 	prepareObjectForCreate(object, "widgets", scopes)
 	if _, err := uuid.Parse(object.ID); err != nil {
@@ -19,7 +19,7 @@ func TestPrepareObjectForCreateOwnsServerMetadata(t *testing.T) {
 	if _, err := uuid.Parse(object.UID); err != nil {
 		t.Fatalf("UID = %q, want UUID: %v", object.UID, err)
 	}
-	if object.ResourceVersion != 0 || object.Generation != 1 || object.CreationTimestamp.IsZero() {
+	if object.ResourceVersion != "" || object.Generation != 1 || object.CreationTimestamp.IsZero() {
 		t.Fatalf("server metadata = %#v", object)
 	}
 }
@@ -37,7 +37,7 @@ func TestPrepareObjectForUpdatePreservesLargeIntegerChanges(t *testing.T) {
 	current := &lifecycleCounter{Count: 9007199254740992, Ratio: 1.5}
 	current.Status.Observed = 9007199254740993
 	prepareObjectForCreate(current, "lifecyclecounters", nil)
-	current.ResourceVersion = 1
+	current.ResourceVersion = "1"
 	desired := *current
 	desired.Count++
 	desired.Status.Observed = 0

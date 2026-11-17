@@ -3,6 +3,7 @@ package etcdcache
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -51,7 +52,7 @@ func (c *generic) Watch(ctx context.Context, obj store.ObjectList, opts ...store
 
 	storageOptions := storage.ListOptions{
 		Predicate:       preficate,
-		ResourceVersion: formatResourceVersion(options.ResourceVersion),
+		ResourceVersion: options.ResourceVersion,
 	}
 	// allow watch bookmarks to enabled watchlist
 	if options.SendInitialEvents {
@@ -136,7 +137,7 @@ func (w *warpWatcher) run(ctx context.Context) {
 				}
 				if !w.sendEvent(ctx, store.WatchEvent{
 					Type:            store.WatchEventBookmark,
-					ResourceVersion: bookmark.GetRevision(),
+					ResourceVersion: strconv.FormatInt(bookmark.GetRevision(), 10),
 				}) {
 					return
 				}

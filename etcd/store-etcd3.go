@@ -255,7 +255,7 @@ func (e *EtcdStore) Create(ctx context.Context, obj store.Object, opts ...store.
 	if err := e.core.serializer.Decode(data, obj); err != nil {
 		return errors.NewInternalError(err)
 	}
-	obj.SetResourceVersion(resourceVersion)
+	obj.SetResourceVersion(formatRevision(resourceVersion))
 	return nil
 }
 
@@ -292,7 +292,11 @@ func (e *EtcdStore) Delete(ctx context.Context, obj store.Object, opts ...store.
 			return err
 		}
 		if prepareObjectForDelete(current, policy) {
-			if err := e.core.directDelete(ctx, e.scopes, current, current.GetResourceVersion()); err != nil {
+			version, err := parseRevision(current.GetResourceVersion())
+			if err != nil {
+				return err
+			}
+			if err := e.core.directDelete(ctx, e.scopes, current, version); err != nil {
 				if errors.IsConflict(err) {
 					continue
 				}
@@ -331,7 +335,11 @@ func (e *EtcdStore) Get(ctx context.Context, name string, obj store.Object, opts
 		return err
 	}
 	preparedKey := e.core.getkey(e.scopes, resource, name)
-	_, err = e.core.getCurrent(ctx, preparedKey, obj, obj.GetResourceVersion())
+	revision, err := parseRevision(obj.GetResourceVersion())
+	if err != nil {
+		return err
+	}
+	_, err = e.core.getCurrent(ctx, preparedKey, obj, revision)
 	if err != nil {
 		return err
 	}
@@ -387,13 +395,17 @@ func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...sto
 	rangeEnd := clientv3.GetPrefixRangeEnd(key)
 	requested := store.ApplyListOptions(opts)
 	bounded := !options.IncludeSubScopes && (requested.Sort == "" || requested.Sort == "id+") && options.Limit > 0
+	requestedRevision, err := parseRevision(options.ResourceVersion)
+	if err != nil {
+		return err
+	}
 	var revision int64
 	for {
 		getOptions := []clientv3.OpOption{clientv3.WithRange(rangeEnd)}
 		if revision != 0 {
 			getOptions = append(getOptions, clientv3.WithRev(revision))
-		} else if options.ResourceVersion != nil {
-			getOptions = append(getOptions, clientv3.WithRev(*options.ResourceVersion))
+		} else if requestedRevision != 0 {
+			getOptions = append(getOptions, clientv3.WithRev(requestedRevision))
 		}
 		if bounded {
 			getOptions = append(getOptions, clientv3.WithLimit(int64(options.Offset)+int64(options.Limit)-int64(len(items))))
@@ -404,8 +416,8 @@ func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...sto
 		}
 		if revision == 0 {
 			revision = response.Header.Revision
-			if options.ResourceVersion != nil && *options.ResourceVersion > 0 {
-				revision = *options.ResourceVersion
+			if requestedRevision > 0 {
+				revision = requestedRevision
 			}
 		}
 		for _, kv := range response.Kvs {
@@ -417,7 +429,7 @@ func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...sto
 			if err := e.core.serializer.Decode(kv.Value, object); err != nil {
 				return errors.NewInternalError(err)
 			}
-			object.SetResourceVersion(kv.ModRevision)
+			object.SetResourceVersion(formatRevision(kv.ModRevision))
 			matches, err := matchFieldRequirements(object, options.FieldRequirements)
 			if err != nil {
 				return err
@@ -449,7 +461,7 @@ func (e *EtcdStore) List(ctx context.Context, list store.ObjectList, opts ...sto
 	}
 	list.SetResource(resource)
 	list.SetScopes(e.scopes)
-	list.SetResourceVersion(revision)
+	list.SetResourceVersion(formatRevision(revision))
 	return page.Finish(list)
 }
 
@@ -506,10 +518,10 @@ func (e *EtcdStore) Update(ctx context.Context, obj store.Object, opts ...store.
 		return err
 	}
 	updatefunc := func(current store.Object) (store.Object, error) {
-		if resourceVersion := requested.GetResourceVersion(); resourceVersion != 0 {
+		if resourceVersion := requested.GetResourceVersion(); resourceVersion != "" {
 			if resourceVersion != current.GetResourceVersion() {
 				return nil, errors.NewConflict(current.GetResource(), requested.GetID(),
-					fmt.Errorf("resourceVersion %d does not match", resourceVersion))
+					fmt.Errorf("resourceVersion %s does not match", resourceVersion))
 			}
 		}
 		desired := store.NewObject(requested)
@@ -583,10 +595,10 @@ func (e *EtcdStatusStore) Update(ctx context.Context, obj store.Object, opts ...
 		return err
 	}
 	updatefunc := func(current store.Object) (store.Object, error) {
-		if resourceVersion := requested.GetResourceVersion(); resourceVersion != 0 {
+		if resourceVersion := requested.GetResourceVersion(); resourceVersion != "" {
 			if resourceVersion != current.GetResourceVersion() {
 				return nil, errors.NewConflict(resource, requested.GetID(),
-					fmt.Errorf("resourceVersion %d does not match", resourceVersion))
+					fmt.Errorf("resourceVersion %s does not match", resourceVersion))
 			}
 		}
 		desired := store.NewObject(requested)
@@ -711,7 +723,10 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 	}
 	lease := response.Kvs[0].Lease
 	for {
-		currentversion := current.GetResourceVersion()
+		currentversion, err := parseRevision(current.GetResourceVersion())
+		if err != nil {
+			return err
+		}
 		unstructured, err := store.ToUnstructured(current)
 		if err != nil {
 			return err
@@ -763,10 +778,10 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 			if err := store.CopyObject(updated, obj); err != nil {
 				return errors.NewInternalError(err)
 			}
-			obj.SetResourceVersion(txnResp.Header.Revision)
+			obj.SetResourceVersion(formatRevision(txnResp.Header.Revision))
 			return nil
 		}
-		updated.SetResourceVersion(0)
+		updated.SetResourceVersion("")
 		data, err := e.serializer.Encode(updated)
 		if err != nil {
 			return errors.NewInternalError(err)
@@ -811,7 +826,7 @@ func (e *etcdStoreCore) tryUpdate(ctx context.Context, scopes []store.Scope, obj
 		if err := e.serializer.Decode(data, obj); err != nil {
 			return errors.NewInternalError(err)
 		}
-		obj.SetResourceVersion(currentversion)
+		obj.SetResourceVersion(formatRevision(currentversion))
 		return nil
 	}
 }
@@ -846,7 +861,7 @@ func (s *etcdStoreCore) decodeGetResp(getResp *clientv3.GetResponse, into store.
 			return nil, errors.NewInternalError(err)
 		}
 	}
-	into.SetResourceVersion(kv.ModRevision)
+	into.SetResourceVersion(formatRevision(kv.ModRevision))
 	return kv.Value, nil
 }
 
@@ -891,7 +906,7 @@ func (e *etcdStoreCore) directDelete(ctx context.Context, scopes []store.Scope, 
 	// fill resourceVersion
 	deleteResp := txnResp.Responses[1].GetResponseDeleteRange()
 	if header := deleteResp.Header; header != nil {
-		obj.SetResourceVersion(header.Revision)
+		obj.SetResourceVersion(formatRevision(header.Revision))
 	}
 	return nil
 }

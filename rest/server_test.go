@@ -2,6 +2,7 @@ package rest
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
@@ -132,7 +133,7 @@ func TestRemoteStoreListPassesCursor(t *testing.T) {
 		store.WithLabelRequirements(labelRequirement),
 		store.WithFieldRequirements(fieldRequirement),
 		store.WithFields("id", "name"),
-		store.WithResourceVersion(7),
+		store.WithResourceVersion("7"),
 		store.WithSubScopes(),
 	); err != nil {
 		t.Fatalf("List() error = %v", err)
@@ -146,7 +147,7 @@ func TestRemoteStoreListPassesCursor(t *testing.T) {
 	if !reflect.DeepEqual(underlying.listOptions.Fields, []string{"id", "name"}) {
 		t.Fatalf("ListOptions.Fields = %#v", underlying.listOptions.Fields)
 	}
-	if underlying.listOptions.ResourceVersion == nil || *underlying.listOptions.ResourceVersion != 7 {
+	if underlying.listOptions.ResourceVersion != "7" {
 		t.Fatalf("ListOptions.ResourceVersion = %#v", underlying.listOptions.ResourceVersion)
 	}
 	if !underlying.listOptions.IncludeSubScopes {
@@ -162,6 +163,17 @@ func TestRemoteStoreListPassesCursor(t *testing.T) {
 		t.Fatalf("List.Continue = %q, want %q", got, "next-token")
 	}
 
+}
+
+func TestServerListRejectsResourceVersionMatch(t *testing.T) {
+	serverAPI := NewServer(&optionCaptureStore{})
+	handler := api.New().Group(serverAPI.Group()).Build()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/widgets?resourceVersionMatch=Exact", nil)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestRemoteStoreListPreservesWindow(t *testing.T) {
@@ -274,14 +286,14 @@ func TestRemoteStoreGetPassesProtocolOptions(t *testing.T) {
 	}
 
 	if err := remote.Get(context.Background(), "widget-1", object,
-		store.WithResourceVersion(7),
+		store.WithResourceVersion("7"),
 		store.WithFields("id", "name"),
 		store.WithLabelRequirements(labelRequirement),
 		store.WithFieldRequirements(fieldRequirement),
 	); err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if underlying.getOptions.ResourceVersion == nil || *underlying.getOptions.ResourceVersion != 7 {
+	if underlying.getOptions.ResourceVersion != "7" {
 		t.Fatalf("GetOptions.ResourceVersion = %#v", underlying.getOptions.ResourceVersion)
 	}
 	if !reflect.DeepEqual(underlying.getOptions.Fields, []string{"id", "name"}) {
@@ -333,7 +345,7 @@ func TestRemoteStoreDeletePassesConditions(t *testing.T) {
 		store.WithLabelRequirements(labelRequirement),
 		store.WithFieldRequirements(fieldRequirement),
 		store.WithUID("uid-1"),
-		store.WithResourceVersion(7),
+		store.WithResourceVersion("7"),
 	); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
@@ -345,7 +357,7 @@ func TestRemoteStoreDeletePassesConditions(t *testing.T) {
 	}
 	if underlying.deleteOptions.Preconditions == nil ||
 		*underlying.deleteOptions.Preconditions.UID != "uid-1" ||
-		*underlying.deleteOptions.Preconditions.ResourceVersion != 7 {
+		underlying.deleteOptions.Preconditions.ResourceVersion != "7" {
 		t.Fatalf("Preconditions = %#v", underlying.deleteOptions.Preconditions)
 	}
 }
@@ -407,17 +419,17 @@ func TestRemoteGetPreservesExactPreconditionsAndReadVersion(t *testing.T) {
 	underlying := &optionCaptureStore{}
 	remote := newCaptureRemoteStore(t, underlying)
 	uid := ""
-	exactVersion := int64(0)
+	exactVersion := "0"
 	object := &store.Unstructured{}
 	object.SetResource("widgets")
 	if err := remote.Get(t.Context(), "one", object,
-		store.WithResourceVersion(7),
-		store.WithPreconditions(store.Preconditions{UID: &uid, ResourceVersion: &exactVersion}),
+		store.WithResourceVersion("7"),
+		store.WithPreconditions(store.Preconditions{UID: &uid, ResourceVersion: exactVersion}),
 	); err != nil {
 		t.Fatal(err)
 	}
 	options := underlying.getOptions
-	if options.ResourceVersion == nil || *options.ResourceVersion != 7 || options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "" || options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != 0 {
+	if options.ResourceVersion != "7" || options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "" || options.Preconditions.ResourceVersion != "0" {
 		t.Fatalf("read and exact versions were not preserved independently: %#v", options)
 	}
 }
@@ -433,13 +445,13 @@ func TestRemotePatchPassesExactPreconditions(t *testing.T) {
 	object := &store.Unstructured{}
 	object.SetResource("widgets")
 	object.SetID("one")
-	zero := int64(0)
+	zero := "0"
 	uid := "expected"
-	if err := remote.Patch(t.Context(), object, store.MapMergePatch{"name": "updated"}, store.WithPreconditions(store.Preconditions{UID: &uid, ResourceVersion: &zero})); err != nil {
+	if err := remote.Patch(t.Context(), object, store.MapMergePatch{"name": "updated"}, store.WithPreconditions(store.Preconditions{UID: &uid, ResourceVersion: zero})); err != nil {
 		t.Fatal(err)
 	}
 	conditions := underlying.patchOptions.Preconditions
-	if conditions == nil || conditions.ResourceVersion == nil || *conditions.ResourceVersion != 0 || conditions.UID == nil || *conditions.UID != uid {
+	if conditions == nil || conditions.ResourceVersion != "0" || conditions.UID == nil || *conditions.UID != uid {
 		t.Fatalf("Patch preconditions: %#v", conditions)
 	}
 }

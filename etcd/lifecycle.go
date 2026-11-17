@@ -5,18 +5,36 @@ import (
 	"math/big"
 	"reflect"
 	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
 
+// parseRevision reads the numeric encoding this adapter uses while the contract
+// keeps resourceVersion opaque.
+func parseRevision(version string) (int64, error) {
+	if version == "" {
+		return 0, nil
+	}
+	revision, err := strconv.ParseInt(version, 10, 64)
+	if err != nil || revision < 0 {
+		return 0, errors.NewBadRequest("resourceVersion is not an etcd revision")
+	}
+	return revision, nil
+}
+
+func formatRevision(revision int64) string {
+	return strconv.FormatInt(revision, 10)
+}
+
 func prepareObjectForCreate(obj store.Object, resource string, scopes []store.Scope) {
 	if obj.GetID() == "" {
 		obj.SetID(uuid.NewString())
 	}
 	obj.SetUID(uuid.NewString())
-	obj.SetResourceVersion(0)
+	obj.SetResourceVersion("")
 	obj.SetGeneration(1)
 	obj.SetCreationTimestamp(store.ServerTimestampNow())
 	obj.SetDeletionTimestamp(nil)

@@ -47,9 +47,21 @@ Search 与 SearchFields 在 List、Count 间无损传递；Fields 只影响支�
 分页、排序、搜索、投影及分页快照请求不进入 Watch。资源、Scope 和适用于操作的查询条件
 保持各自的 Store 语义，不能由 HTTP 路由重新解释 Scope 的层级身份。
 
-读取 resourceVersion 的缺省、零值及正值保留其新鲜度含义，不能把缺省转换为允许缓存。
+读取 resourceVersion 的缺省、空值及 "0" 保留其新鲜度含义，不能把缺省转换为允许缓存。
 精确读取前置条件使用 preconditionUID、preconditionResourceVersion，与新鲜度独立；
-按 query 参数是否出现保留指针语义，显式空 UID 或零版本不能视为未提供。
+按 query 参数是否出现保留语义：显式空 UID 不能视为未提供，空 resourceVersion 表示无版本条件。
+
+## Watch 传输
+
+Watch 使用 SSE。每个事件的数据是 `{resourceVersion, object, message}`：resourceVersion 是
+事件在流中的位置，与对象自身的 resourceVersion 是两个值，不能互相推导；object 在
+Bookmark 事件中省略。Client 原样保留位置用于续传，不在 HTTP adapter 中解析或重新编号。
+
+订阅在响应开始时生效：Server 写完响应头立即 flush，因此没有待发送事件的续传请求也能
+及时返回，不依赖“先来一条事件”来确认连接。错误以 error 事件携带 message 发送，随后流关闭。
+
+List 请求收到 resourceVersionMatch 时返回 BadRequest。分页快照由 Continue 绑定一次查询，
+HTTP adapter 不实现 Exact 或 NotOlderThan，也不静默忽略调用方要求的一致性模式。
 
 ## 写入、删除与错误
 

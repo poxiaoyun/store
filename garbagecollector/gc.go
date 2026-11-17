@@ -610,7 +610,7 @@ func (gc *GarbageCollector) deleteObject(ctx context.Context, item objectIdentit
 }
 
 type ObjectMetaForPatch struct {
-	ResourceVersion int64                  `json:"resourceVersion"`
+	ResourceVersion string                 `json:"resourceVersion"`
 	OwnerReferences []store.OwnerReference `json:"ownerReferences"`
 }
 

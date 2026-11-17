@@ -3,7 +3,6 @@ package etcdcache
 import (
 	"encoding/json"
 	"maps"
-	"strconv"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,11 +68,10 @@ func (s *StorageObjectListMeta) SetRemainingItemCount(c *int64) {
 
 // GetResourceVersion implements v1.ListInterface.
 func (s *StorageObjectListMeta) GetResourceVersion() string {
-	intval, ok := NestedFieldInt64(s.Object, "resourceVersion")
-	if !ok {
-		return ""
+	if version := GetNestedString(s.Object, "resourceVersion"); version != "" {
+		return version
 	}
-	return strconv.FormatInt(intval, 10)
+	return "0"
 }
 
 // SetResourceVersion implements v1.ListInterface.
@@ -82,11 +80,7 @@ func (s *StorageObjectListMeta) SetResourceVersion(version string) {
 		RemoveNestedField(s.Object, "resourceVersion")
 		return
 	}
-	intval, err := strconv.ParseInt(version, 10, 64)
-	if err != nil {
-		return
-	}
-	s.setNestedField(intval, "resourceVersion")
+	s.setNestedField(version, "resourceVersion")
 }
 
 func (u *StorageObjectListMeta) setNestedField(value any, fields ...string) {
@@ -124,15 +118,22 @@ func (s *StorageObjectList) SetRemainingItemCount(c *int64) {
 	}
 }
 
-// GetResourceVersion must implement meta.List
-// otherwise it may return an int64
-func (s *StorageObjectList) GetResourceVersion() int64 {
-	val, _ := NestedFieldInt64(s.Object, "resourceVersion")
-	return val
+// GetResourceVersion implements meta.List.
+func (s *StorageObjectList) GetResourceVersion() string {
+	// The apiserver storage layer parses this value as a number, so an absent
+	// list version reads as "0" rather than empty.
+	if version := GetNestedString(s.Object, "resourceVersion"); version != "" {
+		return version
+	}
+	return "0"
 }
 
 // SetResourceVersion implements meta.List.
-func (s *StorageObjectList) SetResourceVersion(version int64) {
+func (s *StorageObjectList) SetResourceVersion(version string) {
+	if version == "" {
+		RemoveNestedField(s.Object, "resourceVersion")
+		return
+	}
 	s.setNestedField(version, "resourceVersion")
 }
 

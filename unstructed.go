@@ -94,12 +94,16 @@ func (u *Unstructured) SetAnnotations(annotations map[string]string) {
 }
 
 // GetResourceVersion implements Object.
-func (u *Unstructured) GetResourceVersion() int64 {
-	return GetNestedInt64(u.Object, "resourceVersion")
+func (u *Unstructured) GetResourceVersion() string {
+	return GetNestedString(u.Object, "resourceVersion")
 }
 
-// SetResourceVersion implements Object.
-func (u *Unstructured) SetResourceVersion(v int64) {
+// SetResourceVersion implements Object. An empty value removes the field.
+func (u *Unstructured) SetResourceVersion(v string) {
+	if v == "" {
+		RemoveNestedField(u.Object, "resourceVersion")
+		return
+	}
 	u.setNestedField(v, "resourceVersion")
 }
 

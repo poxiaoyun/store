@@ -36,7 +36,7 @@ func newCollection(definition store.ResourceSchema) *collection {
 
 // prepare copies through the model codec, retaining the schema's native types
 // even when the Watch event or caller uses Unstructured.
-func (c *collection) prepare(source store.Object, revision int64) (store.Object, error) {
+func (c *collection) prepare(source store.Object, version string) (store.Object, error) {
 	prototype := c.definition.Object
 	if prototype == nil {
 		prototype = source
@@ -45,7 +45,7 @@ func (c *collection) prepare(source store.Object, revision int64) (store.Object,
 	if err := store.CopyObject(source, object); err != nil {
 		return nil, err
 	}
-	object.SetResourceVersion(revision)
+	object.SetResourceVersion(version)
 	return object, nil
 }
 
@@ -117,9 +117,6 @@ func (c *collection) count(ctx context.Context, scopes []store.Scope, opts ...st
 }
 
 func (c *collection) getObject(ctx context.Context, scopes []store.Scope, id string, into store.Object, options store.GetOptions) error {
-	if options.ResourceVersion != nil && *options.ResourceVersion > 0 {
-		return errors.NewUnsupported("collection has no collection freshness version")
-	}
 	if len(options.Fields) != 0 {
 		return errors.NewUnsupported("in-memory store does not support field projection")
 	}
@@ -142,9 +139,6 @@ func (c *collection) getObject(ctx context.Context, scopes []store.Scope, id str
 }
 
 func (c *collection) listObjects(ctx context.Context, scopes []store.Scope, list store.ObjectList, options store.ListOptions) error {
-	if options.ResourceVersion != nil && *options.ResourceVersion > 0 {
-		return errors.NewUnsupported("collection has no collection freshness version")
-	}
 	if len(options.Fields) != 0 {
 		return errors.NewUnsupported("in-memory store does not support field projection")
 	}
@@ -174,7 +168,7 @@ func (c *collection) listObjects(ctx context.Context, scopes []store.Scope, list
 	}
 	list.SetResource(c.definition.ResourceName)
 	list.SetScopes(slices.Clone(scopes))
-	list.SetResourceVersion(0)
+	list.SetResourceVersion("")
 	return page.Finish(list)
 }
 

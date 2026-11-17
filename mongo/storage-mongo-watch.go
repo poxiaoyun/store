@@ -38,7 +38,7 @@ func (m *MongoStorage) Watch(ctx context.Context, obj store.ObjectList, opts ...
 	if err != nil {
 		return nil, err
 	}
-	if options.ResourceVersion != nil && *options.ResourceVersion > 0 {
+	if options.ResourceVersion != "" && options.ResourceVersion != "0" {
 		return nil, errors.NewResourceExpired(resource, "watch history is unavailable")
 	}
 	_, newObjFunc, err := store.NewItemFuncFromList(obj)

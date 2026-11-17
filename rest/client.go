@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -182,8 +183,8 @@ func (c Client) Delete(ctx context.Context, obj store.Object, opts ...store.Dele
 		if options.Preconditions.UID != nil {
 			queries.Add("uid", *options.Preconditions.UID)
 		}
-		if options.Preconditions.ResourceVersion != nil {
-			queries.Add("resourceVersion", strconv.FormatInt(*options.Preconditions.ResourceVersion, 10))
+		if options.Preconditions.ResourceVersion != "" {
+			queries.Add("resourceVersion", options.Preconditions.ResourceVersion)
 		}
 	}
 	if options.PropagationPolicy != nil {
@@ -211,8 +212,8 @@ func (c Client) Get(ctx context.Context, name string, obj store.Object, opts ...
 	if err := addSelectorQueries(queries, options.LabelRequirements, options.FieldRequirements); err != nil {
 		return err
 	}
-	if options.ResourceVersion != nil {
-		queries.Add("resourceVersion", strconv.FormatInt(*options.ResourceVersion, 10))
+	if options.ResourceVersion != "" {
+		queries.Add("resourceVersion", options.ResourceVersion)
 	}
 	addPreconditionQueries(queries, options.Preconditions)
 	if options.Fields != nil {
@@ -260,8 +261,8 @@ func (c Client) List(ctx context.Context, list store.ObjectList, opts ...store.L
 	if options.Sort != "" {
 		queries.Add("sort", options.Sort)
 	}
-	if options.ResourceVersion != nil {
-		queries.Add("resourceVersion", strconv.FormatInt(*options.ResourceVersion, 10))
+	if options.ResourceVersion != "" {
+		queries.Add("resourceVersion", options.ResourceVersion)
 	}
 	if options.Fields != nil {
 		queries.Add("fields", strings.Join(options.Fields, ","))
@@ -297,8 +298,8 @@ func (c Client) Watch(ctx context.Context, obj store.ObjectList, opts ...store.W
 	if err := addSelectorQueries(queries, options.LabelRequirements, options.FieldRequirements); err != nil {
 		return nil, err
 	}
-	if options.ResourceVersion != nil {
-		queries.Add("resourceVersion", strconv.FormatInt(*options.ResourceVersion, 10))
+	if options.ResourceVersion != "" {
+		queries.Add("resourceVersion", options.ResourceVersion)
 	}
 	if options.IncludeSubScopes {
 		queries.Add("includeSubscopes", "true")
@@ -349,10 +350,21 @@ func (w *watcher) run(ctx context.Context) {
 	defer w.cancel()
 	defer w.resp.Body.Close()
 	err := api.NewSSEDecode(ctx, w.resp.Body, func(e api.Event) error {
-		event := store.WatchEvent{Type: store.WatchEventType(e.Event)}
-		if event.Type != store.WatchEventBookmark {
+		var payload struct {
+			ResourceVersion string          `json:"resourceVersion"`
+			Object          json.RawMessage `json:"object"`
+			Message         string          `json:"message"`
+		}
+		if err := json.Unmarshal(e.Data, &payload); err != nil {
+			return err
+		}
+		if e.Event == "error" {
+			return fmt.Errorf("watch stream: %s", payload.Message)
+		}
+		event := store.WatchEvent{Type: store.WatchEventType(e.Event), ResourceVersion: payload.ResourceVersion}
+		if len(payload.Object) != 0 && string(payload.Object) != "null" {
 			event.Object = w.newObject()
-			if err := json.Unmarshal(e.Data, event.Object); err != nil {
+			if err := json.Unmarshal(payload.Object, event.Object); err != nil {
 				return err
 			}
 		}
@@ -497,8 +509,8 @@ func addPreconditionQueries(queries url.Values, conditions *store.Preconditions)
 	if conditions.UID != nil {
 		queries.Set("preconditionUID", *conditions.UID)
 	}
-	if conditions.ResourceVersion != nil {
-		queries.Set("preconditionResourceVersion", strconv.FormatInt(*conditions.ResourceVersion, 10))
+	if conditions.ResourceVersion != "" {
+		queries.Set("preconditionResourceVersion", conditions.ResourceVersion)
 	}
 }
 

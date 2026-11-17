@@ -72,7 +72,7 @@ func queryStores(t *testing.T, objects []*queryRecord) (map[string]store.Store, 
 func queryIDs(t testing.TB, source store.Store, options ...store.ListOption) []string {
 	t.Helper()
 	result := &store.List[queryRecord]{}
-	if err := source.List(t.Context(), result, append(options, store.WithResourceVersion(0))...); err != nil {
+	if err := source.List(t.Context(), result, append(options, store.WithResourceVersion("0"))...); err != nil {
 		t.Fatal(err)
 	}
 	ids := []string{}
@@ -133,7 +133,7 @@ func TestOrderedIndexQueries(t *testing.T) {
 					}
 				})
 			}
-			options := []store.ListOption{store.WithResourceVersion(0), store.WithFieldRequirements(selector.RequirementEqual("group", "g"), selector.RequirementGreaterThan("number", 10)), store.WithSort("number-,id-")}
+			options := []store.ListOption{store.WithResourceVersion("0"), store.WithFieldRequirements(selector.RequirementEqual("group", "g"), selector.RequirementGreaterThan("number", 10)), store.WithSort("number-,id-")}
 			result := &store.List[queryRecord]{}
 			ids := []string{}
 			for {
@@ -403,7 +403,7 @@ func TestFilteredPagesAcrossScopes(t *testing.T) {
 					}
 					for _, size := range []int{1, 2, 3, 10} {
 						options := []store.ListOption{
-							store.WithResourceVersion(0), store.WithSubScopes(),
+							store.WithResourceVersion("0"), store.WithSubScopes(),
 							store.WithFieldRequirements(selector.RequirementEqual("group", "g")),
 							store.WithLabelRequirements(selector.RequirementEqual("region", "east")),
 							store.WithSearch("MATCH"), store.WithSearchFields("code"), store.WithSort(order),
@@ -492,7 +492,7 @@ func TestIndexedMutationSequence(t *testing.T) {
 		}
 		until(t, func() bool {
 			current := &queryRecord{}
-			err := cache.Get(t.Context(), id, current, store.WithResourceVersion(0))
+			err := cache.Get(t.Context(), id, current, store.WithResourceVersion("0"))
 			if deleted {
 				if commonerrors.IsNotFound(err) {
 					return true

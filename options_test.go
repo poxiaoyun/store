@@ -64,22 +64,22 @@ func TestApplyListOptionsAcceptsPaginationForms(t *testing.T) {
 }
 
 func TestSharedOptionsApplyAcrossOperations(t *testing.T) {
-	resourceVersion := WithResourceVersion(7)
+	resourceVersion := WithResourceVersion("7")
 	get := ApplyGetOptions([]GetOption{resourceVersion})
 	list := ApplyListOptions([]ListOption{resourceVersion, WithSubScopes()})
 	watch := ApplyWatchOptions([]WatchOption{resourceVersion, WithSubScopes()})
 	deleted := ApplyDeleteOptions([]DeleteOption{resourceVersion})
 
-	if get.ResourceVersion == nil || *get.ResourceVersion != 7 {
+	if get.ResourceVersion != "7" {
 		t.Fatalf("Get ResourceVersion = %#v", get.ResourceVersion)
 	}
-	if list.ResourceVersion == nil || *list.ResourceVersion != 7 || !list.IncludeSubScopes {
+	if list.ResourceVersion != "7" || !list.IncludeSubScopes {
 		t.Fatalf("List options = %#v", list)
 	}
-	if watch.ResourceVersion == nil || *watch.ResourceVersion != 7 || !watch.IncludeSubScopes {
+	if watch.ResourceVersion != "7" || !watch.IncludeSubScopes {
 		t.Fatalf("Watch options = %#v", watch)
 	}
-	if deleted.Preconditions == nil || deleted.Preconditions.ResourceVersion == nil || *deleted.Preconditions.ResourceVersion != 7 {
+	if deleted.Preconditions == nil || deleted.Preconditions.ResourceVersion != "7" {
 		t.Fatalf("Delete options = %#v", deleted)
 	}
 
@@ -99,17 +99,17 @@ func TestSharedOptionsApplyAcrossOperations(t *testing.T) {
 }
 
 func TestPreconditionsOptionOverwritesOnlyPresentValues(t *testing.T) {
-	resourceVersion := int64(7)
+	resourceVersion := "7"
 	options := ApplyDeleteOptions([]DeleteOption{
 		WithUID("uid-1"),
-		WithPreconditions(Preconditions{ResourceVersion: &resourceVersion}),
+		WithPreconditions(Preconditions{ResourceVersion: resourceVersion}),
 		WithUID("uid-2"),
 	})
 
 	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "uid-2" {
 		t.Fatalf("UID precondition = %#v", options.Preconditions)
 	}
-	if options.Preconditions.ResourceVersion == nil || *options.Preconditions.ResourceVersion != 7 {
+	if options.Preconditions.ResourceVersion != "7" {
 		t.Fatalf("ResourceVersion precondition = %#v", options.Preconditions)
 	}
 }

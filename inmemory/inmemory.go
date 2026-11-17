@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -210,9 +211,6 @@ func (i *InMemory) Watch(ctx context.Context, obj store.ObjectList, opts ...stor
 	if err := validateSelectorRequirements(options.LabelRequirements, options.FieldRequirements); err != nil {
 		return nil, err
 	}
-	if options.ResourceVersion != nil && *options.ResourceVersion > 0 {
-		return nil, errors.NewResourceExpired(resource, "watch history is unavailable")
-	}
 	_, newItem, err := store.NewItemFuncFromList(obj)
 	if err != nil {
 		return nil, err
@@ -232,7 +230,10 @@ func (i *InMemory) Watch(ctx context.Context, obj store.ObjectList, opts ...stor
 		newItem:           newItem,
 		events:            make(chan store.WatchEvent, 100),
 	}
-	i.core.addWatcher(watcher, options.SendInitialEvents)
+	if err := i.core.addWatcher(watcher, options); err != nil {
+		cancel()
+		return nil, err
+	}
 	go func() {
 		<-watcherCtx.Done()
 		i.core.removeWatcher(watcher)
@@ -264,7 +265,17 @@ type inmemory struct {
 	watcherID  atomic.Int64
 	watchers   map[int64]*inmemoryWatcher
 	dispatcher *eventDispatcher
+
+	// history retains recent changes so a watch can resume from a checkpoint.
+	// trimmed is the highest revision that is no longer available.
+	historyMu sync.Mutex
+	history   []change
+	trimmed   int64
 }
+
+// maxChangeHistory bounds the replay window. A checkpoint older than the
+// retained window returns ResourceExpired instead of silently skipping events.
+const maxChangeHistory = 1024
 
 type change struct {
 	revision int64
@@ -358,12 +369,36 @@ func cloneObject(obj store.Object) store.Object {
 // enqueue runs under the resource write lock so each resource's events retain
 // commit order. Watches observe one resource at a time.
 func (m *inmemory) enqueue(item change) {
+	m.record(item)
 	m.watcherMu.RLock()
 	dispatcher := m.dispatcher
 	m.watcherMu.RUnlock()
 	if dispatcher != nil {
 		dispatcher.queue.push(item)
 	}
+}
+
+func (m *inmemory) record(item change) {
+	m.historyMu.Lock()
+	m.history = append(m.history, item)
+	if len(m.history) > maxChangeHistory {
+		drop := len(m.history) - maxChangeHistory
+		m.trimmed = m.history[drop-1].revision
+		m.history = append([]change(nil), m.history[drop:]...)
+	}
+	m.historyMu.Unlock()
+}
+
+func (m *inmemory) changesAfter(revision int64) ([]change, int64) {
+	m.historyMu.Lock()
+	defer m.historyMu.Unlock()
+	items := make([]change, 0, len(m.history))
+	for _, item := range m.history {
+		if item.revision > revision {
+			items = append(items, item)
+		}
+	}
+	return items, m.trimmed
 }
 
 type inmemoryWatcher struct {
@@ -394,7 +429,7 @@ func (m *inmemory) create(resource string, scopes []store.Scope, name string, va
 		return errors.NewAlreadyExists(resource, name)
 	}
 	revision := m.rev.Add(1)
-	prepared, err := c.prepare(value, int64(revision))
+	prepared, err := c.prepare(value, strconv.FormatUint(revision, 10))
 	if err != nil {
 		return err
 	}
@@ -402,7 +437,7 @@ func (m *inmemory) create(resource string, scopes []store.Scope, name string, va
 		return err
 	}
 	c.commit(key, prepared)
-	value.SetResourceVersion(int64(revision))
+	value.SetResourceVersion(strconv.FormatInt(int64(revision), 10))
 	m.enqueue(change{revision: int64(revision), new: prepared})
 	return nil
 }
@@ -424,8 +459,8 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 	if !matches(current, options.LabelRequirements, options.FieldRequirements) {
 		return false, errors.NewConflict(resource, desired.GetID(), fmt.Errorf("write conditions did not match"))
 	}
-	if desired.GetResourceVersion() != 0 && desired.GetResourceVersion() != kv.GetResourceVersion() {
-		return false, errors.NewConflict(resource, desired.GetID(), fmt.Errorf("resourceVersion %d does not match", desired.GetResourceVersion()))
+	if desired.GetResourceVersion() != "" && desired.GetResourceVersion() != kv.GetResourceVersion() {
+		return false, errors.NewConflict(resource, desired.GetID(), fmt.Errorf("resourceVersion %s does not match", desired.GetResourceVersion()))
 	}
 	deleted, err := prepareObjectForUpdate(current, desired, status)
 	if err != nil {
@@ -438,7 +473,7 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 		return true, nil
 	}
 	revision := m.rev.Add(1)
-	prepared, err := c.prepare(desired, int64(revision))
+	prepared, err := c.prepare(desired, strconv.FormatUint(revision, 10))
 	if err != nil {
 		return false, err
 	}
@@ -446,17 +481,17 @@ func (m *inmemory) put(resource string, scopes []store.Scope, desired store.Obje
 		return false, err
 	}
 	c.commit(key, prepared)
-	desired.SetResourceVersion(int64(revision))
+	desired.SetResourceVersion(strconv.FormatInt(int64(revision), 10))
 	m.enqueue(change{revision: int64(revision), old: current, new: prepared})
 	return false, nil
 }
 
-func (m *inmemory) addWatcher(watcher *inmemoryWatcher, sendInitialEvents bool) {
+func (m *inmemory) addWatcher(watcher *inmemoryWatcher, options store.WatchOptions) error {
 	c := m.collection(watcher.resource)
 	c.mu.RLock()
 	m.watcherMu.Lock()
-	m.watchers[watcher.id] = watcher
-	if sendInitialEvents {
+	snapshot := int64(m.rev.Load())
+	if options.SendInitialEvents {
 		prefix := getkey(watcher.scopes, "")
 		initial := []store.Object{}
 		for key, value := range c.objects {
@@ -470,17 +505,42 @@ func (m *inmemory) addWatcher(watcher *inmemoryWatcher, sendInitialEvents bool) 
 		}
 		watcher.events = make(chan store.WatchEvent, max(100, len(initial)+1))
 		for _, value := range initial {
-			watcher.sendValue(store.WatchEventCreate, value)
+			watcher.sendValue(store.WatchEventCreate, value, snapshot)
 		}
-		watcher.send(store.WatchEvent{Type: store.WatchEventBookmark})
+		watcher.send(store.WatchEvent{
+			Type:            store.WatchEventBookmark,
+			ResourceVersion: strconv.FormatInt(snapshot, 10),
+		})
+	} else if from := options.ResourceVersion; from != "" && from != "0" {
+		start, err := strconv.ParseInt(from, 10, 64)
+		if err != nil || start < 0 || start > snapshot {
+			m.watcherMu.Unlock()
+			c.mu.RUnlock()
+			return errors.NewResourceExpired(watcher.resource, "watch history is unavailable")
+		}
+		replay, oldest := m.changesAfter(start)
+		if start < oldest {
+			m.watcherMu.Unlock()
+			c.mu.RUnlock()
+			return errors.NewResourceExpired(watcher.resource, "watch history is unavailable")
+		}
+		if len(replay) > 0 {
+			watcher.events = make(chan store.WatchEvent, max(100, len(replay)+1))
+			for _, item := range replay {
+				watcher.sendChange(item.revision, item.old, item.new)
+				snapshot = max(snapshot, item.revision)
+			}
+		}
 	}
-	watcher.startRevision = int64(m.rev.Load())
+	watcher.startRevision = snapshot
+	m.watchers[watcher.id] = watcher
 	if m.dispatcher == nil {
 		m.dispatcher = newEventDispatcher()
 		go m.dispatcher.run(m)
 	}
 	m.watcherMu.Unlock()
 	c.mu.RUnlock()
+	return nil
 }
 
 func (m *inmemory) removeWatcher(watcher *inmemoryWatcher) {
@@ -502,9 +562,9 @@ func (m *inmemory) notify(item change) {
 	}
 }
 
-func (w *inmemoryWatcher) sendValue(eventType store.WatchEventType, value store.Object) {
+func (w *inmemoryWatcher) sendValue(eventType store.WatchEventType, value store.Object, revision int64) {
 	if w.matches(value) {
-		w.sendObject(eventType, value)
+		w.sendObject(eventType, value, revision)
 	}
 }
 
@@ -532,23 +592,24 @@ func (w *inmemoryWatcher) sendChange(revision int64, old, new store.Object) {
 	oldMatches, newMatches := w.matches(old), w.matches(new)
 	switch {
 	case !oldMatches && newMatches:
-		w.sendObject(store.WatchEventCreate, new)
+		w.sendObject(store.WatchEventCreate, new, revision)
 	case oldMatches && newMatches:
-		w.sendObject(store.WatchEventUpdate, new)
+		w.sendObject(store.WatchEventUpdate, new, revision)
 	case oldMatches && !newMatches:
-		w.sendObject(store.WatchEventDelete, old)
+		w.sendObject(store.WatchEventDelete, old, revision)
 	}
 }
 
-func (w *inmemoryWatcher) sendObject(eventType store.WatchEventType, source store.Object) {
+func (w *inmemoryWatcher) sendObject(eventType store.WatchEventType, source store.Object, revision int64) {
 	object := w.newItem()
 	if err := store.CopyObject(source, object); err != nil {
 		w.sendTerminalError(errors.NewInternalError(err))
 		return
 	}
 	w.send(store.WatchEvent{
-		Type:   eventType,
-		Object: object,
+		Type:            eventType,
+		Object:          object,
+		ResourceVersion: strconv.FormatInt(revision, 10),
 	})
 }
 
@@ -624,7 +685,7 @@ func (m *inmemory) patch(
 		return true, nil
 	}
 	revision := m.rev.Add(1)
-	prepared, err := c.prepare(desired, int64(revision))
+	prepared, err := c.prepare(desired, strconv.FormatUint(revision, 10))
 	if err != nil {
 		return false, err
 	}
@@ -635,7 +696,7 @@ func (m *inmemory) patch(
 	if err := store.CopyObject(desired, into); err != nil {
 		return false, errors.NewInternalError(err)
 	}
-	into.SetResourceVersion(int64(revision))
+	into.SetResourceVersion(strconv.FormatInt(int64(revision), 10))
 	m.enqueue(change{revision: int64(revision), old: current, new: prepared})
 	return false, nil
 }
@@ -667,7 +728,7 @@ func (m *inmemory) delete(resource string, scopes []store.Scope, desired store.O
 	}
 	if !prepareObjectForDelete(current, policy) {
 		revision := m.rev.Add(1)
-		prepared, err := c.prepare(current, int64(revision))
+		prepared, err := c.prepare(current, strconv.FormatUint(revision, 10))
 		if err != nil {
 			return false, err
 		}
@@ -678,7 +739,7 @@ func (m *inmemory) delete(resource string, scopes []store.Scope, desired store.O
 		if err := store.CopyObject(current, desired); err != nil {
 			return false, errors.NewInternalError(err)
 		}
-		desired.SetResourceVersion(int64(revision))
+		desired.SetResourceVersion(strconv.FormatInt(int64(revision), 10))
 		m.enqueue(change{revision: int64(revision), old: old, new: prepared})
 		return false, nil
 	}

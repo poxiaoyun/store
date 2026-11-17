@@ -16,7 +16,7 @@ func TestRunListWatchRequestsInitialEventsAndPublishesSnapshot(t *testing.T) {
 	watches := &sourceTestStore{
 		events: []store.WatchEvent{
 			{Type: store.WatchEventCreate, Object: object},
-			{Type: store.WatchEventBookmark, ResourceVersion: 42},
+			{Type: store.WatchEventBookmark, ResourceVersion: "42"},
 		},
 	}
 	var received TypedWatchEvent[*store.Unstructured]
@@ -31,8 +31,8 @@ func TestRunListWatchRequestsInitialEventsAndPublishesSnapshot(t *testing.T) {
 	if !watches.options.SendInitialEvents || !watches.options.IncludeSubScopes {
 		t.Fatalf("WatchOptions = %#v, want initial events and subscopes", watches.options)
 	}
-	if watches.options.ResourceVersion != nil {
-		t.Fatalf("WatchOptions.ResourceVersion = %v, want nil", *watches.options.ResourceVersion)
+	if watches.options.ResourceVersion != "" {
+		t.Fatalf("WatchOptions.ResourceVersion = %v, want empty", watches.options.ResourceVersion)
 	}
 	if received.Type != store.WatchEventCreate || received.Object.GetID() != "one" {
 		t.Fatalf("handler event = %#v, want initial Create", received)

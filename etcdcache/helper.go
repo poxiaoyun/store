@@ -212,7 +212,7 @@ func (a APIObjectVersioner) UpdateList(obj runtime.Object, resourceVersion uint6
 	if !ok {
 		return fmt.Errorf("object is not a StorageObjectList")
 	}
-	object.setNestedField(float64(resourceVersion), "resourceVersion")
+	object.setNestedField(strconv.FormatUint(resourceVersion, 10), "resourceVersion")
 	if nextKey != "" {
 		SetNestedFieldNoCopy(object.Object, nextKey, "continue")
 	}

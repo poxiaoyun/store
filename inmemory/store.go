@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"strconv"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -32,13 +33,16 @@ type CacheStore struct {
 
 type cacheState struct {
 	resources map[string]*collection
-	schema    *store.Schema
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.RWMutex
-	started   bool
-	done      chan struct{}
-	changed   chan struct{}
+	// watermarks is the last stream position each resource has applied.
+	// It is empty while a resource is rebuilding.
+	watermarks map[string]string
+	schema     *store.Schema
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.RWMutex
+	started    bool
+	done       chan struct{}
+	changed    chan struct{}
 }
 
 var _ store.ClosableStore = (*CacheStore)(nil)
@@ -52,12 +56,13 @@ func NewCacheStore(source store.Store, options CacheStoreOptions) (*CacheStore, 
 	schema := source.Schema()
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &cacheState{
-		schema:    schema,
-		resources: map[string]*collection{},
-		ctx:       ctx,
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		changed:   make(chan struct{}),
+		schema:     schema,
+		resources:  map[string]*collection{},
+		watermarks: map[string]string{},
+		ctx:        ctx,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		changed:    make(chan struct{}),
 	}
 	for _, selected := range options.Resources {
 		name, err := schema.ResourceName(selected)
@@ -124,6 +129,8 @@ func (s *CacheStore) syncResource(ctx context.Context, name string) error {
 			}
 			current = next
 			s.shared.mu.Lock()
+			// The new snapshot has no watermark until its Bookmark arrives.
+			s.shared.watermarks[name] = ""
 			s.shared.resources[name] = next
 			close(s.shared.changed)
 			s.shared.changed = make(chan struct{})
@@ -136,7 +143,14 @@ func (s *CacheStore) syncResource(ctx context.Context, name string) error {
 		InvalidateFunc: func(ctx context.Context, cause error) {
 			s.shared.mu.Lock()
 			s.shared.resources[name] = nil
+			s.shared.watermarks[name] = ""
 			s.shared.mu.Unlock()
+		},
+		CheckpointFunc: func(ctx context.Context, resourceVersion string) error {
+			s.shared.mu.Lock()
+			s.shared.watermarks[name] = resourceVersion
+			s.shared.mu.Unlock()
+			return nil
 		},
 	})
 }
@@ -193,19 +207,22 @@ func (s *CacheStore) Scope(scopes ...store.Scope) store.Store {
 	return &CacheStore{Store: s.Store.Scope(scopes...), shared: s.shared, scopes: append(slices.Clone(s.scopes), scopes...)}
 }
 
-// Get delegates authoritative reads and serves zero from the cache. Positive
-// freshness requirements are unsupported because the cache has no read revision.
+// Get delegates authoritative reads and serves zero from the cache. A version
+// requirement is served from the cache only when its watermark proves the cache
+// is at least that new; otherwise the read delegates to the authoritative Store.
 // An unsynchronized resource returns ServiceUnavailable without waiting.
 func (s *CacheStore) Get(ctx context.Context, id string, object store.Object, options ...store.GetOption) error {
 	request := store.ApplyGetOptions(options)
-	if request.ResourceVersion == nil {
+	if request.ResourceVersion == "" {
 		return s.Store.Get(ctx, id, object, options...)
 	}
-	if *request.ResourceVersion > 0 {
-		return errors.NewUnsupported("cache has no collection freshness version")
+	name, err := s.shared.schema.ResourceName(object)
+	if err != nil {
+		return err
 	}
-	if *request.ResourceVersion < 0 {
-		return errors.NewBadRequest("resourceVersion must not be negative")
+	if request.ResourceVersion != "0" && !s.shared.watermarkCovers(name, request.ResourceVersion) {
+		// The cache cannot prove it is new enough; the authority always can.
+		return s.Store.Get(ctx, id, object, options...)
 	}
 	resource, err := s.cachedResource(object)
 	if err != nil {
@@ -215,23 +232,47 @@ func (s *CacheStore) Get(ctx context.Context, id string, object store.Object, op
 }
 
 // List applies the complete Store query before pagination on one cached snapshot.
+// A version requirement follows the Get rule: serve it from the cache only when
+// the watermark covers it, otherwise delegate to the authoritative Store.
 // An unsynchronized resource returns ServiceUnavailable without waiting.
 func (s *CacheStore) List(ctx context.Context, list store.ObjectList, options ...store.ListOption) error {
 	request := store.ApplyListOptions(options)
-	if request.ResourceVersion == nil {
+	if request.ResourceVersion == "" {
 		return s.Store.List(ctx, list, options...)
 	}
-	if *request.ResourceVersion > 0 {
-		return errors.NewUnsupported("cache has no collection freshness version")
+	name, err := s.shared.schema.ResourceName(list)
+	if err != nil {
+		return err
 	}
-	if *request.ResourceVersion < 0 {
-		return errors.NewBadRequest("resourceVersion must not be negative")
+	if request.ResourceVersion != "0" && !s.shared.watermarkCovers(name, request.ResourceVersion) {
+		return s.Store.List(ctx, list, options...)
 	}
 	resource, err := s.cachedResource(list)
 	if err != nil {
 		return err
 	}
 	return resource.listObjects(ctx, s.scopes, list, request)
+}
+
+// watermarkCovers reports whether the resource has applied a stream position at
+// least as new as version. Opaque or non-numeric versions cannot be compared
+// here, so they always delegate.
+func (c *cacheState) watermarkCovers(resource, version string) bool {
+	c.mu.RLock()
+	watermark := c.watermarks[resource]
+	c.mu.RUnlock()
+	if watermark == "" {
+		return false
+	}
+	applied, err := strconv.ParseInt(watermark, 10, 64)
+	if err != nil {
+		return false
+	}
+	required, err := strconv.ParseInt(version, 10, 64)
+	if err != nil {
+		return false
+	}
+	return applied >= required
 }
 
 func (s *CacheStore) cachedResource(object any) (*collection, error) {

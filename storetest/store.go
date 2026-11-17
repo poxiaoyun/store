@@ -83,13 +83,13 @@ func Run(t *testing.T, fixture Fixture) {
 	runIdentity(t, fixture)
 	update := func(ctx context.Context, s commonstore.Store, object commonstore.Object) error {
 		if !fixture.Capabilities.OptimisticLock {
-			object.SetResourceVersion(0)
+			object.SetResourceVersion("")
 		}
 		return s.Update(ctx, object)
 	}
 	updateStatus := func(ctx context.Context, s commonstore.Store, object commonstore.Object) error {
 		if !fixture.Capabilities.OptimisticLock {
-			object.SetResourceVersion(0)
+			object.SetResourceVersion("")
 		}
 		return s.Status().
 			Update(ctx, object)
@@ -110,10 +110,10 @@ func Run(t *testing.T, fixture Fixture) {
 					t.Fatal(err)
 				}
 				version := before.ResourceVersion
-				condition := commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &version})
+				condition := commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: version})
 				patch := commonstore.MapMergePatch{"value": "changed", "status": map[string]any{"phase": "changed"}}
 				merge := commonstore.MapMergePatch{"resourceVersion": version, "value": "changed", "status": map[string]any{"phase": "changed"}}
-				jsonPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, fmt.Appendf(nil, `[{"op":"test","path":"/resourceVersion","value":%d},{"op":"replace","path":"/value","value":"changed"}]`, version))
+				jsonPatch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, fmt.Appendf(nil, `[{"op":"test","path":"/resourceVersion","value":%q},{"op":"replace","path":"/value","value":"changed"}]`, version))
 				var err error
 				switch operation {
 				case "update":
@@ -383,11 +383,11 @@ func Run(t *testing.T, fixture Fixture) {
 		initial.Stop()
 		AssertWatcherClosed(t, initial)
 
-		if bookmark.ResourceVersion == 0 {
+		if bookmark.ResourceVersion == "" {
 			watcher, err := storage.Watch(
 				t.Context(),
 				&commonstore.List[Object]{Resource: "storetests"},
-				commonstore.WithResourceVersion(1),
+				commonstore.WithResourceVersion("1"),
 			)
 			if watcher != nil {
 				watcher.Stop()
@@ -417,7 +417,7 @@ func Run(t *testing.T, fixture Fixture) {
 		object := &Object{
 			ObjectMeta: commonstore.ObjectMeta{
 				UID:               "caller-uid",
-				ResourceVersion:   99,
+				ResourceVersion:   "99",
 				Generation:        99,
 				CreationTimestamp: commonstore.ObjectMeta{}.CreationTimestamp,
 			},
@@ -432,8 +432,8 @@ func Run(t *testing.T, fixture Fixture) {
 		if _, err := uuid.Parse(object.UID); err != nil {
 			t.Fatalf("Create() UID = %q, want UUID: %v", object.UID, err)
 		}
-		if object.ResourceVersion <= 0 {
-			t.Fatalf("Create() ResourceVersion = %d, want positive", object.ResourceVersion)
+		if object.ResourceVersion == "" {
+			t.Fatalf("Create() ResourceVersion = %q, want non-empty", object.ResourceVersion)
 		}
 		if object.Generation != 1 {
 			t.Fatalf("Create() Generation = %d, want 1", object.Generation)
@@ -466,17 +466,17 @@ func Run(t *testing.T, fixture Fixture) {
 		version := object.ResourceVersion
 		patch := commonstore.MapMergePatch{"value": "updated"}
 		target := &Object{ObjectMeta: commonstore.ObjectMeta{ID: object.ID}}
-		if err := storage.Patch(t.Context(), target, patch, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &version})); err != nil {
+		if err := storage.Patch(t.Context(), target, patch, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: version})); err != nil {
 			t.Fatal(err)
 		}
 		if err := storage.Get(t.Context(), target.ID, target); err != nil {
 			t.Fatal(err)
 		}
-		if target.Value != "updated" || target.ResourceVersion <= version {
+		if target.Value != "updated" || target.ResourceVersion == version {
 			t.Fatalf("patch result: %#v", target)
 		}
-		for _, expected := range []int64{version, 0} {
-			if err := storage.Patch(t.Context(), target, commonstore.MapMergePatch{"value": "rejected"}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &expected})); !commonerrors.IsConflict(err) {
+		for _, expected := range []string{version, "0"} {
+			if err := storage.Patch(t.Context(), target, commonstore.MapMergePatch{"value": "rejected"}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: expected})); !commonerrors.IsConflict(err) {
 				t.Fatalf("stale/zero Patch = %v", err)
 			}
 		}
@@ -500,7 +500,7 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatal(err)
 		}
 		observedVersion, observedUID := object.ResourceVersion, object.UID
-		condition := commonstore.WithPreconditions(commonstore.Preconditions{UID: &observedUID, ResourceVersion: &observedVersion})
+		condition := commonstore.WithPreconditions(commonstore.Preconditions{UID: &observedUID, ResourceVersion: observedVersion})
 		if err := storage.Get(t.Context(), object.ID, &Object{}, condition); err != nil {
 			t.Fatal(err)
 		}
@@ -519,7 +519,7 @@ func Run(t *testing.T, fixture Fixture) {
 				t.Fatal(err)
 			}
 			currentVersion := object.ResourceVersion
-			if err := storage.Get(t.Context(), object.ID, &Object{}, commonstore.WithPreconditions(commonstore.Preconditions{UID: &observedUID, ResourceVersion: &currentVersion}), commonstore.WithFields("value")); err != nil {
+			if err := storage.Get(t.Context(), object.ID, &Object{}, commonstore.WithPreconditions(commonstore.Preconditions{UID: &observedUID, ResourceVersion: currentVersion}), commonstore.WithFields("value")); err != nil {
 				t.Fatalf("projected current Get = %v", err)
 			}
 		}
@@ -529,10 +529,10 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.Get(t.Context(), object.ID, &Object{}, condition, commonstore.WithFieldRequirements(selector.RequirementEqual("value", "other"))); !commonerrors.IsNotFound(err) {
 			t.Fatalf("unselected Get = %v, want NotFound", err)
 		}
-		zero := int64(0)
+		zero := "0"
 		empty := ""
 		for _, preconditions := range []commonstore.Preconditions{
-			{ResourceVersion: &zero}, {UID: &empty},
+			{ResourceVersion: zero}, {UID: &empty},
 		} {
 			if err := storage.Get(t.Context(), object.ID, &Object{}, commonstore.WithPreconditions(preconditions)); !commonerrors.IsConflict(err) {
 				t.Fatalf("explicit zero/empty condition = %v, want Conflict", err)
@@ -596,8 +596,8 @@ func Run(t *testing.T, fixture Fixture) {
 		if object.Value != "two" || object.Status.Phase != "current" {
 			t.Fatalf("Update() = %#v, want value two and preserved status", object)
 		}
-		if object.Generation != 2 || object.ResourceVersion <= previousVersion {
-			t.Fatalf("Update() generation/version = (%d, %d), want generation 2 and version > %d", object.Generation, object.ResourceVersion, previousVersion)
+		if object.Generation != 2 || object.ResourceVersion == previousVersion {
+			t.Fatalf("Update() generation/version = (%d, %q), want generation 2 and a new version", object.Generation, object.ResourceVersion)
 		}
 		if object.UID != uid || !object.CreationTimestamp.Equal(&created) {
 			t.Fatalf("Update() changed immutable identity metadata: %#v", object.ObjectMeta)
@@ -638,8 +638,8 @@ func Run(t *testing.T, fixture Fixture) {
 		if object.Value != "current" || !reflect.DeepEqual(object.Labels, map[string]string{"team": "blue"}) || object.Status.Phase != "ready" {
 			t.Fatalf("Status().Update() = %#v", object)
 		}
-		if object.Generation != generation || object.ResourceVersion <= version {
-			t.Fatalf("Status().Update() generation/version = (%d, %d)", object.Generation, object.ResourceVersion)
+		if object.Generation != generation || object.ResourceVersion == version {
+			t.Fatalf("Status().Update() generation/version = (%d, %q)", object.Generation, object.ResourceVersion)
 		}
 	})
 	t.Run("delete honors finalizers", func(t *testing.T) {
@@ -679,7 +679,15 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("stale UID Delete() error = %v, want Conflict", err)
 		}
 		if fixture.Capabilities.OptimisticLock {
-			if err := storage.Delete(t.Context(), object, commonstore.WithResourceVersion(object.ResourceVersion+1)); !commonerrors.IsConflict(err) {
+			stale := object.ResourceVersion
+			object.Description = "version bump"
+			if err := storage.Update(t.Context(), object); err != nil {
+				t.Fatalf("Update() before stale Delete() error = %v", err)
+			}
+			if err := storage.Get(t.Context(), object.ID, object); err != nil {
+				t.Fatalf("Get() after version bump error = %v", err)
+			}
+			if err := storage.Delete(t.Context(), object, commonstore.WithResourceVersion(stale)); !commonerrors.IsConflict(err) {
 				t.Fatalf("stale ResourceVersion Delete() error = %v, want Conflict", err)
 			}
 		}
@@ -786,7 +794,7 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.Get(t.Context(), object.ID, object); err != nil {
 			t.Fatal(err)
 		}
-		if object.Value != "two" || object.ResourceVersion <= expectedVersion {
+		if object.Value != "two" || object.ResourceVersion == expectedVersion {
 			t.Fatalf("Patch() result = %#v", object)
 		}
 	})
@@ -860,7 +868,7 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("Create() error = %v", err)
 		}
 		patch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(fmt.Sprintf(`[
-            {"op":"test","path":"/resourceVersion","value":%d},
+            {"op":"test","path":"/resourceVersion","value":%q},
             {"op":"replace","path":"/value","value":"two"}
         ]`, object.ResourceVersion)))
 		if fixture.MergePatchOnly || fixture.JSONPatchSetOnly {
@@ -892,7 +900,7 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatalf("Update() error = %v", err)
 		}
 		patch := commonstore.RawPatch(commonstore.PatchTypeJSONPatch, []byte(fmt.Sprintf(`[
-            {"op":"test","path":"/resourceVersion","value":%d},
+            {"op":"test","path":"/resourceVersion","value":%q},
             {"op":"replace","path":"/value","value":"stale"}
         ]`, staleVersion)))
 		if fixture.MergePatchOnly || fixture.JSONPatchSetOnly {
@@ -1011,21 +1019,25 @@ func Run(t *testing.T, fixture Fixture) {
 			t.Fatal(err)
 		}
 		initialVersion := object.ResourceVersion
-		object.ResourceVersion = 0
+		object.ResourceVersion = ""
 		if err := update(t.Context(), storage, object); err != nil {
 			t.Fatal(err)
 		}
 		if err := storage.Get(t.Context(), object.ID, object); err != nil {
 			t.Fatal(err)
 		}
-		if object.ResourceVersion < initialVersion || object.Generation != 1 {
+		if object.ResourceVersion == "" || object.Generation != 1 {
 			t.Fatalf("no-op metadata = %#v", object.ObjectMeta)
+		}
+		object.Value = "changed"
+		if err := update(t.Context(), storage, object); err != nil {
+			t.Fatal(err)
 		}
 		before := &Object{}
 		if err := storage.Get(t.Context(), object.ID, before); err != nil {
 			t.Fatal(err)
 		}
-		wrongVersion := before.ResourceVersion + 1
+		wrongVersion := initialVersion
 		for _, operation := range []string{"update", "patch", "status update", "status patch", "delete"} {
 			t.Run(operation, func(t *testing.T) {
 				target := &Object{}
@@ -1038,14 +1050,14 @@ func Run(t *testing.T, fixture Fixture) {
 					target.ResourceVersion = wrongVersion
 					err = storage.Update(t.Context(), target)
 				case "patch":
-					err = storage.Patch(t.Context(), target, commonstore.MapMergePatch{"value": "same"}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &wrongVersion}))
+					err = storage.Patch(t.Context(), target, commonstore.MapMergePatch{"value": "same"}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: wrongVersion}))
 				case "status update":
 					target.ResourceVersion = wrongVersion
 					err = storage.Status().
 						Update(t.Context(), target)
 				case "status patch":
 					err = storage.Status().
-						Patch(t.Context(), target, commonstore.MapMergePatch{"status": map[string]any{}}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: &wrongVersion}))
+						Patch(t.Context(), target, commonstore.MapMergePatch{"status": map[string]any{}}, commonstore.WithPreconditions(commonstore.Preconditions{ResourceVersion: wrongVersion}))
 				case "delete":
 					err = storage.Delete(t.Context(), target, commonstore.WithResourceVersion(wrongVersion))
 				}
@@ -1093,7 +1105,7 @@ func Run(t *testing.T, fixture Fixture) {
 		if err := storage.Get(t.Context(), object.ID, unconditional); err != nil {
 			t.Fatalf("Get() error = %v", err)
 		}
-		unconditional.ResourceVersion = 0
+		unconditional.ResourceVersion = ""
 		unconditional.Value = "unconditional"
 		if err := storage.Update(t.Context(), unconditional); err != nil {
 			t.Fatalf("unconditional Update() error = %v", err)
@@ -1514,7 +1526,7 @@ func runFinalizers(t *testing.T, fixture Fixture) {
 				switch operation {
 				case "update":
 					object.Finalizers = []string{"example.com/retain"}
-					object.ResourceVersion = 0
+					object.ResourceVersion = ""
 					err = storage.Update(t.Context(), object)
 				case "patch":
 					err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": []string{"example.com/retain"}})
@@ -1605,7 +1617,7 @@ func runFinalizers(t *testing.T, fixture Fixture) {
 			switch operation {
 			case "update":
 				object.Finalizers = []string{"example.com/retain", "example.com/new"}
-				object.ResourceVersion = 0 // Exercise the unconditional write contract.
+				object.ResourceVersion = "" // Exercise the unconditional write contract.
 				err = storage.Update(t.Context(), object)
 			case "merge patch":
 				err = storage.Patch(t.Context(), object, commonstore.MapMergePatch{"finalizers": []string{"example.com/retain", "example.com/new"}})
@@ -1654,7 +1666,7 @@ func runFinalizers(t *testing.T, fixture Fixture) {
 						t.Fatal(err)
 					}
 					object.Finalizers = nil
-					object.ResourceVersion = 0 // Verify the unconditional lifecycle transition.
+					object.ResourceVersion = "" // Verify the unconditional lifecycle transition.
 					if err := storage.Update(t.Context(), object); err != nil {
 						t.Fatal(err)
 					}
@@ -1695,7 +1707,7 @@ func runFinalizers(t *testing.T, fixture Fixture) {
 			if err := storage.Get(t.Context(), retained.ID, retained); err != nil {
 				t.Fatal(err)
 			}
-			if retained.Value != "after" || retained.Status.Phase != "pending" || retained.DeletionTimestamp == nil || retained.ResourceVersion <= version || retained.Generation != generation+1 {
+			if retained.Value != "after" || retained.Status.Phase != "pending" || retained.DeletionTimestamp == nil || retained.ResourceVersion == version || retained.Generation != generation+1 {
 				t.Fatalf("batch patch violated update contract: %#v", retained)
 			}
 			if err := storage.PatchBatch(t.Context(), &commonstore.List[Object]{}, commonstore.MapMergePatchBacth{"finalizers": []string{"example.com/new"}}); fixture.BatchFinalizerRemovalOnly && !commonerrors.IsUnsupported(err) || !fixture.BatchFinalizerRemovalOnly && commonerrors.ReasonForError(err) != commonerrors.StatusReasonBadRequest {
@@ -2281,17 +2293,17 @@ func runMutationConditions(t *testing.T, fixture Fixture) {
 				}
 				storage := NewStore(t, fixture)
 				object := &Object{ObjectMeta: commonstore.ObjectMeta{ID: "target"}, Value: "before"}
-				version := int64(1)
+				version := "1"
 				var requirements commonstore.Requirements
 				var preconditions *commonstore.Preconditions
 				if condition == "missing versioned object" {
 					object.ResourceVersion = version
-					preconditions = &commonstore.Preconditions{ResourceVersion: &version}
+					preconditions = &commonstore.Preconditions{ResourceVersion: version}
 				} else {
 					if err := storage.Create(t.Context(), object); err != nil {
 						t.Fatal(err)
 					}
-					object.ResourceVersion = 0
+					object.ResourceVersion = ""
 					requirements = commonstore.Requirements{selector.RequirementEqual("value", "other")}
 				}
 				patch := commonstore.MapMergePatch{"value": "after", "status": map[string]any{"phase": "ready"}}

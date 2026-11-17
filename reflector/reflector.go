@@ -12,6 +12,14 @@ import (
 	"xiaoshiai.cn/store"
 )
 
+// CheckpointHandler optionally observes the stream position of published state.
+// A handler can use it to answer reads that require a minimum version.
+type CheckpointHandler interface {
+	// Checkpoint observes the opaque stream position after the corresponding
+	// snapshot or mutation has been published successfully.
+	Checkpoint(ctx context.Context, resourceVersion string) error
+}
+
 // ReflectorHandler owns the authoritative state populated by a Reflector.
 type ReflectorHandler[T any] interface {
 	// Replace atomically publishes one complete initial snapshot.
@@ -27,6 +35,8 @@ type ReflectorHandlerFuncs[T any] struct {
 	ReplaceFunc    func(ctx context.Context, objects []*T) error
 	ApplyFunc      func(ctx context.Context, eventType store.WatchEventType, object *T) error
 	InvalidateFunc func(ctx context.Context, cause error)
+	// CheckpointFunc observes published stream positions when set.
+	CheckpointFunc func(ctx context.Context, resourceVersion string) error
 }
 
 // Replace implements ReflectorHandler.
@@ -42,6 +52,14 @@ func (f ReflectorHandlerFuncs[T]) Apply(ctx context.Context, eventType store.Wat
 // Invalidate implements ReflectorHandler.
 func (f ReflectorHandlerFuncs[T]) Invalidate(ctx context.Context, cause error) {
 	f.InvalidateFunc(ctx, cause)
+}
+
+// Checkpoint implements CheckpointHandler.
+func (f ReflectorHandlerFuncs[T]) Checkpoint(ctx context.Context, resourceVersion string) error {
+	if f.CheckpointFunc == nil {
+		return nil
+	}
+	return f.CheckpointFunc(ctx, resourceVersion)
 }
 
 // Reflector turns the Store initial-Watch protocol into authoritative Replace
@@ -94,7 +112,7 @@ func (r *Reflector[T]) run(ctx context.Context, handler ReflectorHandler[T], reb
 		return commonerrors.NewUnsupported("reflector requires Store Watch support")
 	}
 
-	checkpoint := int64(0)
+	checkpoint := ""
 	valid := false
 	firstSync := true
 	var terminal error
@@ -103,8 +121,8 @@ func (r *Reflector[T]) run(ctx context.Context, handler ReflectorHandler[T], reb
 		if ctx.Err() != nil {
 			return nil
 		}
-		if rebuild || commonerrors.IsResourceExpired(err) || checkpoint == 0 {
-			checkpoint = 0
+		if rebuild || commonerrors.IsResourceExpired(err) || checkpoint == "" {
+			checkpoint = ""
 			if valid {
 				handler.Invalidate(ctx, err)
 				valid = false
@@ -128,11 +146,11 @@ func (r *Reflector[T]) run(ctx context.Context, handler ReflectorHandler[T], reb
 func (r *Reflector[T]) watch(
 	ctx context.Context,
 	handler ReflectorHandler[T],
-	checkpoint *int64,
+	checkpoint *string,
 	valid *bool,
 	firstSync *bool,
 ) error {
-	initial := *checkpoint == 0
+	initial := *checkpoint == ""
 	options := append([]store.WatchOption{}, r.options...)
 	if initial {
 		options = append(options, store.WithSendInitialEvents())
@@ -173,7 +191,10 @@ func (r *Reflector[T]) watch(
 						*firstSync = false
 					}
 				}
-				if event.ResourceVersion > 0 {
+				if event.ResourceVersion != "" {
+					if err := notifyCheckpoint(ctx, handler, event.ResourceVersion); err != nil {
+						return err
+					}
 					*checkpoint = event.ResourceVersion
 				}
 				continue
@@ -192,11 +213,22 @@ func (r *Reflector[T]) watch(
 			if err := handler.Apply(ctx, event.Type, object); err != nil {
 				return err
 			}
-			if event.ResourceVersion > 0 {
+			if event.ResourceVersion != "" {
+				if err := notifyCheckpoint(ctx, handler, event.ResourceVersion); err != nil {
+					return err
+				}
 				*checkpoint = event.ResourceVersion
 			}
 		}
 	}
+}
+
+func notifyCheckpoint[T any](ctx context.Context, handler ReflectorHandler[T], resourceVersion string) error {
+	observer, ok := handler.(CheckpointHandler)
+	if !ok {
+		return nil
+	}
+	return observer.Checkpoint(ctx, resourceVersion)
 }
 
 func applyReflectorSnapshotEvent[T any](objects map[string]*T, eventType store.WatchEventType, object *T) error {

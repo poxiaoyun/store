@@ -24,9 +24,9 @@ change stream。
 add、replace 与 remove；test、copy 和 move 返回 Unsupported，路径按对象字段解释，
 不表示数组下标。replace 会创建缺失字段，remove 对缺失字段是 no-op。
 
-Field Patch 的 operations 按数组顺序生效。路径互不重叠且不涉及业务字段时使用单个
-update document（`$set`、`$unset`、`$inc` 和 `resourceVersion`）；否则每个操作对应
-一个 pipeline stage，以保留声明顺序。`FieldOpExpr` 总是使用 pipeline，把
+Field Patch 的 operations 按数组顺序生效。每个操作对应一个 pipeline stage，以保留声明
+顺序；resourceVersion 是不透明字符串，不能使用经典 update document 的 `$inc`，因此
+总是通过 pipeline 以 `$toLong`/`$toString` 推进。`FieldOpExpr` 总是使用 pipeline，把
 `store.Expr` 编译为 aggregation expression 后在同一次写入中按存储值求值。
 服务端拥有的字段、generation 和 finalizers 不能通过字段补丁修改，status 只能通过
 `Status()` 修改。

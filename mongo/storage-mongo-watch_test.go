@@ -89,7 +89,7 @@ func TestMongoStorageWatchInitialEventsAndSelectorTransitions(t *testing.T) {
 
 	assertMongoWatchEvent(t, watcher, store.WatchEventCreate, "existing")
 	bookmark := nextMongoWatchEvent(t, watcher)
-	if bookmark.Type != store.WatchEventBookmark || bookmark.ResourceVersion != 0 || bookmark.Object != nil {
+	if bookmark.Type != store.WatchEventBookmark || bookmark.ResourceVersion != "" || bookmark.Object != nil {
 		t.Fatalf("initial bookmark = %#v", bookmark)
 	}
 
@@ -166,7 +166,7 @@ func TestMongoStorageWatchReturnsResourceExpiredForUnavailableVersion(t *testing
 	}
 	storage := &MongoStorage{core: &MongoStorageCore{schema: schema}}
 
-	_, err := storage.Watch(t.Context(), &store.List[Message]{}, store.WithResourceVersion(1))
+	_, err := storage.Watch(t.Context(), &store.List[Message]{}, store.WithResourceVersion("1"))
 	if !commonerrors.IsResourceExpired(err) {
 		t.Fatalf("Watch() error = %v, want ResourceExpired", err)
 	}

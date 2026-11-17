@@ -15,10 +15,10 @@ type (
 	GetOptions struct {
 		// Preconditions require an exact UID and/or object version on the selected object.
 		Preconditions *Preconditions
-		// ResourceVersion set to 0 to get from cache
-		// ResourceVersion set to a specific value to get the object not older than that version
-		// ResourceVersion set to nil to get from backend
-		ResourceVersion *int64
+		// ResourceVersion is an opaque read version. Empty reads the backend,
+		// "0" accepts any version including a cache, and any other value
+		// requires an object no older than it.
+		ResourceVersion string
 		// FieldRequirements is a list of conditions that must be true for the get to occur.
 		// It may not supported by all databases.
 		FieldRequirements Requirements
@@ -52,10 +52,10 @@ type (
 		// name is alias for metadata.name
 		// time is alias for metadata.creationTimestamp
 		Sort string
-		// ResourceVersion set to 0 to get from cache
-		// ResourceVersion set to a specific value to get the object not older than that version
-		// ResourceVersion set to nil to get from backend
-		ResourceVersion   *int64
+		// ResourceVersion follows the GetOptions rule: empty reads the backend,
+		// "0" accepts any version, and any other value requires a result no
+		// older than it.
+		ResourceVersion   string
 		LabelRequirements Requirements
 		FieldRequirements Requirements
 		//  IncludeSubScopes is a flag to include resources in subscopes of current scope.
@@ -109,8 +109,10 @@ type (
 	Preconditions struct {
 		// UID prevents deleting a replacement object that reused the same ID.
 		UID *string
-		// ResourceVersion restricts deletion to the observed object version.
-		ResourceVersion *int64
+		// ResourceVersion restricts the write to the observed object version.
+		// An empty value imposes no condition; any other value, including "0",
+		// must match exactly.
+		ResourceVersion string
 	}
 
 	DeleteBatchOptions struct {
@@ -168,7 +170,11 @@ type (
 		ID                string
 		LabelRequirements Requirements
 		FieldRequirements Requirements
-		ResourceVersion   *int64
+		// ResourceVersion is an opaque stream position. Empty and "0" start at
+		// the current end of the stream; any other value must be delivered
+		// strictly after that position, and one the backend cannot locate
+		// returns ResourceExpired.
+		ResourceVersion   string
 		IncludeSubScopes  bool
 		SendInitialEvents bool
 	}
@@ -228,12 +234,12 @@ const (
 )
 
 // WatchEvent describes one ordered change in a Watch stream. ResourceVersion
-// is a global stream checkpoint when positive; Object.ResourceVersion remains
+// is a global stream checkpoint when nonempty; Object.ResourceVersion remains
 // the version of that individual object.
 type WatchEvent struct {
 	Type            WatchEventType
 	Object          Object
-	ResourceVersion int64
+	ResourceVersion string
 	Error           error
 }
 

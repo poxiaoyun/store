@@ -69,24 +69,16 @@ func (s *StorageObjectMeta) SetUID(uid types.UID) {
 
 // GetResourceVersion implements v1.Object.
 func (s *StorageObjectMeta) GetResourceVersion() string {
-	intval, ok := NestedFieldInt64(s.Object, "resourceVersion")
-	if !ok {
-		return ""
-	}
-	return strconv.FormatInt(intval, 10)
+	return GetNestedString(s.Object, "resourceVersion")
 }
 
 // SetResourceVersion implements v1.Object.
 func (s *StorageObjectMeta) SetResourceVersion(version string) {
 	if version == "" {
 		RemoveNestedField(s.Object, "resourceVersion")
-	} else {
-		intval, err := strconv.ParseInt(version, 10, 64)
-		if err != nil {
-			return
-		}
-		s.setNestedField(intval, "resourceVersion")
+		return
 	}
+	s.setNestedField(version, "resourceVersion")
 }
 
 // GetLabels implements v1.Object.
@@ -338,13 +330,13 @@ func (s *StorageObject) GetAnnotations() map[string]string {
 
 // GetRevision returns the resource version as int64 (internal storage use only).
 func (s *StorageObject) GetRevision() int64 {
-	val, _ := NestedFieldInt64(s.Object, "resourceVersion")
-	return val
+	value, _ := strconv.ParseInt(GetNestedString(s.Object, "resourceVersion"), 10, 64)
+	return value
 }
 
 // SetRevision sets the resource version from int64 (internal storage use only).
 func (s *StorageObject) SetRevision(version int64) {
-	s.setNestedField(version, "resourceVersion")
+	s.SetResourceVersion(strconv.FormatInt(version, 10))
 }
 
 // The following methods implement metav1.Object by delegating to StorageObjectMeta.

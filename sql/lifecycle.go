@@ -2,17 +2,29 @@ package sql
 
 import (
 	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
+	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
+
+// sqlVersion converts the opaque contract version into the numeric column this
+// adapter stores. The encoding stays private to the SQL backend.
+func sqlVersion(version string) (int64, error) {
+	value, err := strconv.ParseInt(version, 10, 64)
+	if err != nil || value < 0 {
+		return 0, errors.NewBadRequest("resourceVersion is not a SQL version")
+	}
+	return value, nil
+}
 
 func prepareObjectForCreate(obj store.Object, resource string, scopes []store.Scope) {
 	if obj.GetID() == "" {
 		obj.SetID(uuid.NewString())
 	}
 	obj.SetUID(uuid.NewString())
-	obj.SetResourceVersion(0)
+	obj.SetResourceVersion("")
 	obj.SetGeneration(1)
 	obj.SetCreationTimestamp(store.ServerTimestampNow())
 	obj.SetDeletionTimestamp(nil)

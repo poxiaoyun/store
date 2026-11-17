@@ -16,7 +16,7 @@ func prepareObjectForCreate(obj store.Object, resource string, scopes []store.Sc
 		obj.SetID(uuid.NewString())
 	}
 	obj.SetUID(uuid.NewString())
-	obj.SetResourceVersion(0)
+	obj.SetResourceVersion("")
 	obj.SetGeneration(1)
 	obj.SetCreationTimestamp(store.ServerTimestampNow())
 	obj.SetDeletionTimestamp(nil)

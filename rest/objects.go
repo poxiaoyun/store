@@ -94,8 +94,8 @@ func watchOptionsFromListOptions(options store.ListOptions) []store.WatchOption 
 	if len(options.FieldRequirements) != 0 {
 		result = append(result, store.WithFieldRequirements(options.FieldRequirements...))
 	}
-	if options.ResourceVersion != nil {
-		result = append(result, store.WithResourceVersion(*options.ResourceVersion))
+	if options.ResourceVersion != "" {
+		result = append(result, store.WithResourceVersion(options.ResourceVersion))
 	}
 	if options.IncludeSubScopes {
 		result = append(result, store.WithSubScopes())

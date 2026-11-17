@@ -15,12 +15,12 @@ func TestReflectorPublishesSnapshotThenLiveEvents(t *testing.T) {
 	initial := make(chan store.WatchEvent, 4)
 	live := make(chan store.WatchEvent, 1)
 	upstream := &reflectorTestStore{watches: []chan store.WatchEvent{initial, live}}
-	object := reflectorTestObject("one", 1)
+	object := reflectorTestObject("one", "1")
 	initial <- store.WatchEvent{Type: store.WatchEventCreate, Object: object}
-	initial <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: 7}
+	initial <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: "7"}
 	close(initial)
-	updated := reflectorTestObject("one", 2)
-	live <- store.WatchEvent{Type: store.WatchEventUpdate, Object: updated, ResourceVersion: 8}
+	updated := reflectorTestObject("one", "2")
+	live <- store.WatchEvent{Type: store.WatchEventUpdate, Object: updated, ResourceVersion: "8"}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	handler := &reflectorTestHandler{applied: make(chan store.WatchEvent, 1)}
@@ -40,7 +40,7 @@ func TestReflectorPublishesSnapshotThenLiveEvents(t *testing.T) {
 	}
 	select {
 	case event := <-handler.applied:
-		if event.Type != store.WatchEventUpdate || event.Object.GetResourceVersion() != 2 {
+		if event.Type != store.WatchEventUpdate || event.Object.GetResourceVersion() != "2" {
 			t.Fatalf("Apply() event = %#v, want updated object", event)
 		}
 	case <-time.After(5 * time.Second):
@@ -56,14 +56,14 @@ func TestReflectorPublishesSnapshotThenLiveEvents(t *testing.T) {
 	if len(upstream.options) != 2 || !upstream.options[0].SendInitialEvents {
 		t.Fatalf("Watch options = %#v, want initial Watch followed by resume", upstream.options)
 	}
-	if upstream.options[1].ResourceVersion == nil || *upstream.options[1].ResourceVersion != 7 || upstream.options[1].SendInitialEvents {
+	if upstream.options[1].ResourceVersion != "7" || upstream.options[1].SendInitialEvents {
 		t.Fatalf("resume options = %#v, want resourceVersion 7", upstream.options[1])
 	}
 }
 
 func TestReflectorInvalidatesWhenHistoryIsUnavailable(t *testing.T) {
 	initial := make(chan store.WatchEvent, 2)
-	initial <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: 9}
+	initial <- store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: "9"}
 	close(initial)
 	rebuilt := make(chan store.WatchEvent, 2)
 	rebuilt <- store.WatchEvent{Type: store.WatchEventBookmark}
@@ -148,7 +148,7 @@ func (h *reflectorTestHandler) Invalidate(_ context.Context, err error) {
 	}
 }
 
-func reflectorTestObject(id string, resourceVersion int64) *store.Unstructured {
+func reflectorTestObject(id string, resourceVersion string) *store.Unstructured {
 	object := &store.Unstructured{}
 	object.SetResource("objects")
 	object.SetID(id)

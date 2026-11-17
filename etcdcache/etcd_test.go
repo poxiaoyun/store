@@ -131,7 +131,7 @@ func TestEtcdCacherStore(t *testing.T) {
 		if err := storage.Create(ctx, object); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
-		if object.UID == "" || object.ResourceVersion == 0 || object.Generation != 1 || object.Resource != "myobjects" || object.CreationTimestamp.IsZero() {
+		if object.UID == "" || object.ResourceVersion == "" || object.Generation != 1 || object.Resource != "myobjects" || object.CreationTimestamp.IsZero() {
 			t.Fatalf("Create() metadata = %#v", object.ObjectMeta)
 		}
 		if err := storage.Create(ctx, &MyObject{ObjectMeta: store.ObjectMeta{ID: object.ID}}); !commonerrors.IsAlreadyExists(err) {
@@ -346,7 +346,7 @@ func TestEtcdCacherStore(t *testing.T) {
 			return nil
 		})
 		list := &store.List[MyObject]{}
-		if err := second.List(ctx, list, store.WithResourceVersion(0)); err != nil {
+		if err := second.List(ctx, list, store.WithResourceVersion("0")); err != nil {
 			t.Fatalf("cached List() error = %v", err)
 		}
 		if len(list.Items) != 20 {

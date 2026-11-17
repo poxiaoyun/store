@@ -39,7 +39,7 @@ Scope 复用 ID；违反唯一范围返回 AlreadyExists。更严格的唯一性
 
 ## 更新与并发
 
-普通的读取—修改—写入流程必须保留读取到的 `ResourceVersion`。调用 `Get` 后修改对象再执行 `Update`，或者 `CreateOrUpdate` 返回已有对象时，不要把 `ResourceVersion` 重置为零。
+普通的读取—修改—写入流程必须保留读取到的 `ResourceVersion`。调用 `Get` 后修改对象再执行 `Update`，或者 `CreateOrUpdate` 返回已有对象时，不要把 `ResourceVersion` 置空。
 
 只有明确需要绕过正常乐观并发控制的特殊操作才能重置 `ResourceVersion`，并且必须在赋值处用注释说明原因。
 
@@ -220,11 +220,11 @@ source 须支持 initial Watch，并使用未附加 Scope 的根句柄。缓存�
 底层 Store 由创建方关闭。每个副本独立运行同步任务。
 
 默认 Get/List 委托权威 Store；计价等允许传播延迟的查询显式传入
-`store.WithResourceVersion(0)`，使用相同的 selector、Scope、排序、Limit 和续传选项。
+`store.WithResourceVersion("0")`，使用相同的 selector、Scope、排序、Limit 和续传选项。
 首次同步及断线重建期间，缓存读取立即返回 ServiceUnavailable；需要等待恢复时显式调用
 `WaitSync(ctx)`。等待可由调用 Context 取消，缓存关闭时返回 `io.ErrClosedPipe`。
 WaitSync 成功后仍可能发生断线，调用方需处理查询时的 ServiceUnavailable。
-正数 ResourceVersion 或未注册资源的缓存读取返回 Unsupported。
+非空且非 "0" 的 ResourceVersion，只有在缓存水位不早于该版本时才从缓存读取，否则委托权威 Store。未注册资源的缓存读取返回 Unsupported。
 Count、Watch、Status 和写入委托来源；写入成功与缓存可见之间允许延迟。
 
 本地索引使用来源 Schema 声明的单列和复合索引，支持等值前缀、范围及兼容排序的

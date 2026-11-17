@@ -31,8 +31,10 @@ type Object interface {
 	GetScopes() []Scope
 	SetScopes([]Scope)
 
-	GetResourceVersion() int64
-	SetResourceVersion(int64)
+	// GetResourceVersion returns the object's opaque concurrency version.
+	GetResourceVersion() string
+	// SetResourceVersion sets the opaque version; empty clears the version.
+	SetResourceVersion(version string)
 
 	GetGeneration() int64
 	SetGeneration(int64)
@@ -65,8 +67,10 @@ type ObjectList interface {
 	GetScopes() []Scope
 	SetScopes([]Scope)
 
-	GetResourceVersion() int64
-	SetResourceVersion(int64)
+	// GetResourceVersion returns the opaque collection read version, if provided.
+	GetResourceVersion() string
+	// SetResourceVersion sets the collection read version; empty clears it.
+	SetResourceVersion(version string)
 
 	// GetContinue returns the opaque next-batch token, or empty when a cursor
 	// traversal is complete.
@@ -95,13 +99,14 @@ var _ Object = &ObjectMeta{}
 
 // +k8s:openapi-gen=true
 type ObjectMeta struct {
-	ID                string            `json:"id,omitempty"  validation:"name"`
-	Name              string            `json:"name,omitempty"`
-	UID               string            `json:"uid,omitempty"`
-	APIVersion        string            `json:"apiVersion,omitempty"`
-	Scopes            []Scope           `json:"scopes,omitempty"`
-	Resource          string            `json:"resource,omitempty"`
-	ResourceVersion   int64             `json:"resourceVersion,omitempty"`
+	ID         string  `json:"id,omitempty"  validation:"name"`
+	Name       string  `json:"name,omitempty"`
+	UID        string  `json:"uid,omitempty"`
+	APIVersion string  `json:"apiVersion,omitempty"`
+	Scopes     []Scope `json:"scopes,omitempty"`
+	Resource   string  `json:"resource,omitempty"`
+	// ResourceVersion is the opaque concurrency version assigned by the Store.
+	ResourceVersion   string            `json:"resourceVersion,omitempty"`
 	Generation        int64             `json:"generation,omitempty"`
 	CreationTimestamp meta.Time         `json:"creationTimestamp"`
 	DeletionTimestamp *meta.Time        `json:"deletionTimestamp,omitempty"`
@@ -181,7 +186,7 @@ func (o *ObjectMeta) GetResource() string {
 }
 
 // GetResourceVersion implements Object.
-func (o *ObjectMeta) GetResourceVersion() int64 {
+func (o *ObjectMeta) GetResourceVersion() string {
 	return o.ResourceVersion
 }
 
@@ -236,7 +241,7 @@ func (o *ObjectMeta) SetResource(resource string) {
 }
 
 // SetResourceVersion implements Object.
-func (o *ObjectMeta) SetResourceVersion(resourceVersion int64) {
+func (o *ObjectMeta) SetResourceVersion(resourceVersion string) {
 	o.ResourceVersion = resourceVersion
 }
 
@@ -267,21 +272,43 @@ var _ ObjectList = &List[Object]{}
 // protocol layer.
 type List[T any] struct {
 	Resource        string  `json:"resource,omitempty"`
-	ResourceVersion int64   `json:"resourceVersion,omitempty"`
+	ResourceVersion string  `json:"resourceVersion,omitempty"`
 	Scopes          []Scope `json:"scopes,omitempty"`
 	Items           []T     `json:"items" openapi:"dynamic"`
 	Continue        string  `json:"continue,omitempty"` // Used for pagination, if set, indicates that there are more items to list
 }
 
+// Page is a flat list response. It mirrors the wire shape of a paginated
+// result while keeping ResourceVersion opaque and store-owned.
+type Page[T any] struct {
+	// ResourceVersion identifies the collection snapshot when the backend can
+	// provide one. It is distinct from each item's resourceVersion.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
+	// Total is the exact number of matching items for page or unpaginated
+	// results. Continuation results omit it.
+	Total *int `json:"total,omitempty"`
+	// Items contains the objects in this response.
+	Items []T `json:"items"`
+	// Page is the one-based page number, omitted outside page pagination.
+	Page int `json:"page,omitempty"`
+	// Size is the requested page size, omitted outside page pagination.
+	Size int `json:"size,omitempty"`
+	// Continue is the opaque next-batch token. An empty token means iteration
+	// is complete.
+	Continue string `json:"continue,omitempty"`
+	// Limit is the requested continuation batch size; zero means unlimited.
+	Limit int `json:"limit,omitempty"`
+}
+
 // PageFromList projects the Store read result onto the public list contract.
 // The backend result supplies items, continuation token and resource version;
 // requestOptions supply the protocol echo of the caller's pagination request.
-func PageFromList[T any](list List[T], requestOptions meta.ListOptions) meta.Page[T] {
+func PageFromList[T any](list List[T], requestOptions meta.ListOptions) Page[T] {
 	page := 0
 	if requestOptions.Size > 0 {
 		page = max(requestOptions.Page, 1)
 	}
-	return meta.Page[T]{
+	return Page[T]{
 		ResourceVersion: list.ResourceVersion,
 		Items:           list.Items,
 		Page:            page,
@@ -302,12 +329,12 @@ func (b *List[T]) SetContinue(continueToken string) {
 }
 
 // GetResourceVersion implements ObjectList.
-func (b *List[T]) GetResourceVersion() int64 {
+func (b *List[T]) GetResourceVersion() string {
 	return b.ResourceVersion
 }
 
 // SetResourceVersion implements ObjectList.
-func (b *List[T]) SetResourceVersion(resourceVersion int64) {
+func (b *List[T]) SetResourceVersion(resourceVersion string) {
 	b.ResourceVersion = resourceVersion
 }
 
@@ -395,7 +422,7 @@ func ValidatePreconditions(obj Object, preconditions *Preconditions) error {
 	if preconditions.UID != nil && obj.GetUID() != *preconditions.UID {
 		return errors.NewConflict(obj.GetResource(), obj.GetID(), fmt.Errorf("UID does not match"))
 	}
-	if preconditions.ResourceVersion != nil && obj.GetResourceVersion() != *preconditions.ResourceVersion {
+	if preconditions.ResourceVersion != "" && obj.GetResourceVersion() != preconditions.ResourceVersion {
 		return errors.NewConflict(obj.GetResource(), obj.GetID(), fmt.Errorf("resourceVersion does not match"))
 	}
 	return nil

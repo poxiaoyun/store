@@ -82,10 +82,33 @@ Scope，子 Scope 查询和字段投影也不例外。根 Scope 的空数组、n
 
 ## ResourceVersion、Generation 与 Status
 
-ResourceVersion 是并发控制版本，成功创建后为正数。持久化内容实际改变时必须推进版本；
+ResourceVersion 是并发控制版本，也是 Watch 的流位置，类型是不透明字符串：调用方只能相等
+比较或原样保存回传，不能解析、排序或做算术。成功创建后它的值非空。持久化内容实际改变时
+必须推进版本；
 能够准确判断未发生变化时应保持版本，但允许 backend 在无变化的成功写入中推进版本。
 调用方不能把版本变化当作业务内容变化的证明，也不能假设每次成功调用都会改变版本。
 无变化优化必须在前置条件验证之后，不能把过期条件请求变成成功。
+
+### ResourceVersion 的取值语义
+
+ResourceVersion 只有三种取值形态，含义随操作不同；实现必须按下表执行，不能把三种形态合并。
+
+| 值 | Get / List | Watch | 写前置条件 |
+|---|---|---|---|
+| 空字符串 | Most Recent：从权威后端读取当前值 | 从当前流末尾开始；显式请求 initial Watch 时先发送完整快照 | 未指定版本条件 |
+| `"0"` | Any：允许从缓存或任意版本读取 | 从当前流末尾开始 | 精确匹配 `"0"`；内置后端生成的对象版本从正数开始，因此返回 Conflict |
+| 其他非空值 | Not older than：结果不得早于该版本 | Start at Exact：只发送严格晚于该版本的事件 | 精确匹配该版本 |
+
+补充约束：
+
+- Watch 的空值语义不隐式发送快照；快照由 `WithSendInitialEvents()` 显式请求。k8s 的
+  unset watch 自带合成 Added 事件，这里刻意拆成两个独立能力。
+- Watch 的非空位点严格取该版本之后。位置无法识别或历史已过期返回 ResourceExpired。
+- List 不使用 `resourceVersionMatch`。分页快照由 Continue 绑定同一次查询保证，非空
+  ResourceVersion 与 Limit 同时出现时不要求 Exact；HTTP 层收到 `resourceVersionMatch`
+  必须拒绝，不能静默忽略。
+- `Preconditions.ResourceVersion` 使用字符串值类型，空字符串表示无版本条件。
+- HTTP 的空 query 值（`?resourceVersion=`）等同于未提供。
 
 Generation 从 1 开始，递增规则由各 backend 自行定义。公共元数据与顶层 status 的变化不推进
 Generation；业务字段实际改变时加一。生命周期合并与字段比较必须保留 JSON 数值完整精度；
@@ -98,13 +121,14 @@ Create 可以初始化 status；普通 Update、Patch 和 PatchBatch 保留存�
 
 ## 前置条件与原子写入
 
-`Preconditions` 的 UID 和 ResourceVersion 字段均可选：nil 表示未指定，非 nil 的空 UID
-或零版本仍要求精确匹配。UID 防止同 ID 重建后的新对象被旧请求误操作；ResourceVersion
-限定调用方接受的对象版本。`WithPreconditions` 只覆盖自身非空字段，不清除先前条件。
+`Preconditions` 的 UID 和 ResourceVersion 字段均可选：nil UID 或空 ResourceVersion
+表示未指定；非 nil 的空 UID 仍要求精确匹配。UID 防止同 ID 重建后的新对象被旧请求误操作；
+ResourceVersion 限定调用方接受的对象版本。`WithPreconditions` 只覆盖自身非空字段，不清除
+先前条件。
 
-Update 对象的 ResourceVersion 为零表示无版本条件，非零表示条件写入。Patch 不把传入对象
-上的版本隐式视为前置条件；Merge Patch 的顶层 resourceVersion 非零时构成版本条件，
-省略或零值表示无该条件。JSON Patch 可以用 `test /resourceVersion` 表达条件，test 失败
+Update 对象的 ResourceVersion 为空表示无版本条件，非空表示条件写入。Patch 不把传入对象
+上的版本隐式视为前置条件；Merge Patch 的顶层 resourceVersion 非空时构成版本条件，
+省略或空值表示无该条件。JSON Patch 可以用 `test /resourceVersion` 表达条件，test 失败
 是补丁校验错误，后续操作不得执行。单对象 Patch、Status Patch、Get 和 Delete 均可显式
 提供 `WithPreconditions`。Delete 对象上的 UID、ResourceVersion 不产生隐式条件，
 `WithUID` 和 `WithResourceVersion` 设置 Delete 的相应前置条件。
@@ -296,15 +320,16 @@ Bookmark 不能仅表示一次普通 List 已结束。
 缓存构建要求 initial Watch 能力，不能用无连续性保证的普通 List 加 Watch 拼接。
 首个 Bookmark 前连接中断时丢弃暂存状态，重建成功后才发布新状态。
 
-`WatchEvent.ResourceVersion` 是可选的全局 checkpoint，与对象 ResourceVersion 不同。
-支持恢复位置的 backend 可以发送正数 checkpoint，并接受 `WithResourceVersion(R)`
-请求其后的事件。没有历史续传能力、位置无法识别或历史已过期时返回 ResourceExpired，
-调用方重新建立 initial Watch。对象版本的最大值不能被当作全局 Watch 位置。
+`WatchEvent.ResourceVersion` 是可选的全局 checkpoint，与对象 ResourceVersion 不同，
+取值语义见“ResourceVersion 的取值语义”。支持恢复位置的 backend 发送非空 checkpoint，
+并接受 `WithResourceVersion(R)` 请求其后的事件；没有历史续传能力、位置无法识别或历史
+已过期时返回 ResourceExpired，调用方重新建立 initial Watch。对象版本的最大值不能被当作
+全局 Watch 位置。
 
 缓存和索引视图是权威 Store 的派生读模型，写入始终委托权威 Store，不形成第二个写入源。
 默认 Get/List 从权威 Store 读取；缓存只能服务显式允许缓存的读取，不能改变调用方要求的
-新鲜度。读取 ResourceVersion 与精确 Preconditions 独立：nil 表示权威读取，零允许缓存，
-正值要求满足不早于指定版本的读取保证。对象版本、集合读取版本与 Watch checkpoint 不能
+新鲜度。读取 ResourceVersion 与精确 Preconditions 独立，三种取值语义见“ResourceVersion
+的取值语义”。对象版本、集合读取版本与 Watch checkpoint 不能
 互相推导；无法执行所请求保证时明确失败。
 
 inmemory.CacheStore 通过显式 WaitSync 等待同步；etcdcache 在缓存读取时等待同步。等待由
@@ -360,15 +385,25 @@ CacheStore 管理同步状态。
 
 CacheStore 按资源发布完整集合；首次 Bookmark 前资源不可用，空集合也能完成同步。
 调用方启动 Run 后显式调用 WaitSync，等待所有所选资源当前均已同步，再开始使用缓存。
+inmemory 保留最近 1024 次变更用于续传，位点早于该窗口时返回 ResourceExpired。
 Watch 中断使对应资源失效，重新建立 initial Watch 后发布新集合。初始化和重建期间，
 显式缓存读取立即返回 ServiceUnavailable；调用方需要等待恢复时再次调用 WaitSync。
 WaitSync 响应调用 Context 取消及缓存关闭；成功仅表示返回时已就绪，后续断线仍可失效。
 collection 负责普通并发读写，CacheStore 拥有 Watch 生命周期、发布状态与等待同步。
 对象缓存选择完整重建；Reflector 的历史续传仍可供其他观察者使用。
 
-Get/List 的 nil ResourceVersion 委托权威 Store，零使用本地缓存；正值要求的读取版本
-保证由本实现明确返回 Unsupported。本地查询不合成集合读取版本。Count、对外 Watch、
-全部写入及 Status 委托权威 Store。写入成功只表示权威提交，缓存通过 Watch 异步更新。
+CacheStore 只保存每个对象的最新状态，不保留历史版本；它另外按资源记录一个已应用的
+Watch 水位。读取按以下规则选择来源：
+
+- 空 ResourceVersion 委托权威 Store。异步 Watch 可能落后，"必须最新"只能由权威回答。
+- "0" 使用本地缓存。该请求没有下界，缓存中的任意已提交状态都满足。
+- 其他值仅在缓存水位已证明不早于该版本时使用缓存，否则委托权威 Store。权威当前值
+  必然满足下界，因此不需要返回 Unsupported；证明不了时绝不使用缓存。
+
+水位只在初始 Bookmark 和每个携带 checkpoint 的事件之后推进，重建期间清空。非数值或
+不可比较的 checkpoint（例如来源没有全局位置）无法证明下界，一律委托。本地查询不合成
+集合读取版本。Count、对外 Watch、全部写入及 Status 委托权威 Store。写入成功只表示
+权威提交，缓存通过 Watch 异步更新。
 
 构造仅建立本地状态，Run 启动注册资源的同步并运行到 Context 结束或不可恢复错误。
 WaitSync 是唯一的同步等待入口。Close 幂等停止并等待自身任务，

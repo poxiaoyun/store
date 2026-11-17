@@ -167,7 +167,7 @@ func TestMongoStorageScopedObjectCodecs(t *testing.T) {
 	if err := storage.Get(t.Context(), object.ID, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != object.ID || got.UID == "" || got.Generation != 1 || got.ResourceVersion < 1 || !slices.Equal(got.Scopes, scopes) || got.Labels["example.com/key"] != "value" {
+	if got.ID != object.ID || got.UID == "" || got.Generation != 1 || got.ResourceVersion == "" || !slices.Equal(got.Scopes, scopes) || got.Labels["example.com/key"] != "value" {
 		t.Fatalf("embedded metadata was not preserved: %#v", got.ObjectMeta)
 	}
 	if got.Quantity.Cmp(object.Quantity) != 0 || !got.ObservedAt.Time.Equal(object.ObservedAt.Time) || !got.Address.Equal(object.Address) || got.Revision != object.Revision {
@@ -517,8 +517,8 @@ func TestMongoStorageBatchPatchAdvancesResourceVersion(t *testing.T) {
 	if err := storage.Get(t.Context(), object.ID, got); err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if got.ResourceVersion <= previous || got.Description != "patched" {
-		t.Fatalf("PatchBatch() object = %#v, want description patched and version > %d", got, previous)
+	if got.ResourceVersion == previous || got.Description != "patched" {
+		t.Fatalf("PatchBatch() object = %#v, want description patched and a new version after %q", got, previous)
 	}
 }
 

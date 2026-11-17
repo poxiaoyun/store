@@ -46,9 +46,15 @@ func (s *Storage) planTable(resource string, definition store.ResourceSchema) (t
 		specs[spec.Name] = spec
 	}
 	for _, field := range fields {
+		// resourceVersion is exposed as an opaque string but stays a numeric
+		// column so the adapter can increment it in one statement.
+		columnType := field.Type
+		if field.Name == "resourceVersion" {
+			columnType = reflect.TypeFor[int64]()
+		}
 		columns = append(columns, ColumnSpec{
 			Name:    field.Name,
-			Type:    field.Type,
+			Type:    columnType,
 			Size:    specs[field.Name].Size,
 			Indexed: field.Name == "id",
 		})

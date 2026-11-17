@@ -180,8 +180,8 @@ func (m *MongoStorage) applyFieldOperations(ctx context.Context, obj store.Objec
 			if preconditions.UID != nil {
 				filter = append(filter, bson.E{Key: "uid", Value: *preconditions.UID})
 			}
-			if preconditions.ResourceVersion != nil {
-				filter = append(filter, bson.E{Key: "resourceVersion", Value: *preconditions.ResourceVersion})
+			if preconditions.ResourceVersion != "" {
+				filter = append(filter, bson.E{Key: "resourceVersion", Value: preconditions.ResourceVersion})
 			}
 		}
 		update, err := buildFieldPatchUpdate(operations, generationPaths)
@@ -249,60 +249,10 @@ func (m *MongoStorage) validateFieldPatch(definition store.ResourceSchema, opera
 	return nil
 }
 
-// buildFieldPatchUpdate uses a classic update document only when operations
-// are disjoint, no business field is touched, and no operation needs an
-// expression. Overlapping paths and expressions need one pipeline stage per
-// operation so the declared order and the stored values are observed.
+// buildFieldPatchUpdate always uses the ordered pipeline: resourceVersion is an
+// opaque string, so it cannot be advanced by a classic $inc.
 func buildFieldPatchUpdate(operations []store.FieldOperation, generationPaths []string) (any, error) {
-	if len(generationPaths) == 0 && !fieldPatchOperationsOverlap(operations) && !fieldPatchHasExpression(operations) {
-		return buildClassicFieldPatch(operations), nil
-	}
 	return buildOrderedFieldPatch(operations, generationPaths)
-}
-
-func fieldPatchHasExpression(operations []store.FieldOperation) bool {
-	for _, operation := range operations {
-		if operation.Op == store.FieldOpExpr {
-			return true
-		}
-	}
-	return false
-}
-
-func fieldPatchOperationsOverlap(operations []store.FieldOperation) bool {
-	for index := range operations {
-		for previous := range index {
-			if fieldPathTouches(operations[index].Path, operations[previous].Path) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func buildClassicFieldPatch(operations []store.FieldOperation) bson.D {
-	set := bson.D{}
-	unset := bson.D{}
-	inc := bson.D{{Key: "resourceVersion", Value: int64(1)}}
-	for _, operation := range operations {
-		value := normalizeFieldPatchValue(operation.Value)
-		switch operation.Op {
-		case store.FieldOpSet:
-			set = append(set, bson.E{Key: operation.Path, Value: value})
-		case store.FieldOpUnset:
-			unset = append(unset, bson.E{Key: operation.Path, Value: ""})
-		case store.FieldOpInc:
-			inc = append(inc, bson.E{Key: operation.Path, Value: value})
-		}
-	}
-	update := bson.D{{Key: "$inc", Value: inc}}
-	if len(set) > 0 {
-		update = append(update, bson.E{Key: "$set", Value: set})
-	}
-	if len(unset) > 0 {
-		update = append(update, bson.E{Key: "$unset", Value: unset})
-	}
-	return update
 }
 
 // buildOrderedFieldPatch applies one operation per pipeline stage so
@@ -352,7 +302,10 @@ func buildOrderedFieldPatch(operations []store.FieldOperation, generationPaths [
 		}
 	}
 	pipeline = append(pipeline, bson.D{{Key: "$set", Value: bson.D{
-		{Key: "resourceVersion", Value: bson.D{{Key: "$add", Value: bson.A{"$resourceVersion", int64(1)}}}},
+		{Key: "resourceVersion", Value: bson.D{{Key: "$toString", Value: bson.D{{Key: "$add", Value: bson.A{
+			bson.D{{Key: "$toLong", Value: "$resourceVersion"}},
+			int64(1),
+		}}}}}},
 	}}})
 	if len(generationPaths) == 0 {
 		return pipeline, nil
@@ -505,20 +458,20 @@ func deletePatchPath(object map[string]any, path []string) {
 // decodeMergePatch returns the field edits and the patch's resourceVersion
 // condition. A merge patch merges into its document paths, keeping the keys it
 // does not mention.
-func decodeMergePatch(data []byte) ([]patchField, int64, error) {
+func decodeMergePatch(data []byte) ([]patchField, string, error) {
 	fields, err := decodeMergePatchFields(data)
 	if err != nil {
-		return nil, 0, err
+		return nil, "", err
 	}
 	filtered := make([]patchField, 0, len(fields))
-	version := int64(0)
+	version := ""
 	for _, field := range fields {
 		if field.Column == "resourceVersion" && len(field.Path) == 0 {
-			number, ok := patchVersionNumber(field.Value)
+			value, ok := field.Value.(string)
 			if !ok {
-				return nil, 0, errors.NewBadRequest("resourceVersion must be an integer")
+				return nil, "", errors.NewBadRequest("resourceVersion must be a string")
 			}
-			version = number
+			version = value
 			continue
 		}
 		filtered = append(filtered, field)
@@ -608,23 +561,6 @@ func decodeJSONPatch(data []byte) ([]patchField, []patchTest, error) {
 		}
 	}
 	return fields, tests, nil
-}
-
-// patchVersionNumber reads an integer patch version.
-func patchVersionNumber(value any) (int64, bool) {
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed), true
-	case int64:
-		return typed, true
-	case int:
-		return int64(typed), true
-	case json.Number:
-		number, err := typed.Int64()
-		return number, err == nil
-	default:
-		return 0, false
-	}
 }
 
 // sortedMapKeys returns map keys in a stable order.

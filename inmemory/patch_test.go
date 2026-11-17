@@ -24,7 +24,7 @@ type fieldPatchTestNested struct {
 func TestFieldPatchAppliesRelativeOperations(t *testing.T) {
 	note := "old"
 	object := &fieldPatchTestObject{
-		ObjectMeta: store.ObjectMeta{ResourceVersion: 7},
+		ObjectMeta: store.ObjectMeta{ResourceVersion: "7"},
 		Balance:    100,
 		Note:       &note,
 		Nested:     fieldPatchTestNested{Count: 1, Keep: "keep"},
@@ -47,8 +47,8 @@ func TestFieldPatchAppliesRelativeOperations(t *testing.T) {
 	if object.Nested.Keep != "keep" {
 		t.Fatalf("unset removed a sibling: %#v", object.Nested)
 	}
-	if object.ResourceVersion != 7 {
-		t.Fatalf("patch changed resourceVersion: %d", object.ResourceVersion)
+	if object.ResourceVersion != "7" {
+		t.Fatalf("patch changed resourceVersion: %q", object.ResourceVersion)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestFieldPatchRejectsInvalidOperations(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			object := &fieldPatchTestObject{ObjectMeta: store.ObjectMeta{ResourceVersion: 1}}
+			object := &fieldPatchTestObject{ObjectMeta: store.ObjectMeta{ResourceVersion: "1"}}
 			patch := store.RawPatch(store.PatchTypeFieldPatch, []byte(test.data))
 			if err := ApplyPatch(object, object, patch); err == nil {
 				t.Fatal("invalid field patch was accepted")
@@ -75,7 +75,7 @@ func TestFieldPatchRejectsInvalidOperations(t *testing.T) {
 
 func TestFieldPatchAppliesOverlappingOperationsInOrder(t *testing.T) {
 	object := &fieldPatchTestObject{
-		ObjectMeta: store.ObjectMeta{ResourceVersion: 1},
+		ObjectMeta: store.ObjectMeta{ResourceVersion: "1"},
 		Balance:    100,
 		Nested:     fieldPatchTestNested{Count: 1, Keep: "keep"},
 	}
@@ -93,7 +93,7 @@ func TestFieldPatchAppliesOverlappingOperationsInOrder(t *testing.T) {
 	}
 
 	reversed := &fieldPatchTestObject{
-		ObjectMeta: store.ObjectMeta{ResourceVersion: 1},
+		ObjectMeta: store.ObjectMeta{ResourceVersion: "1"},
 		Balance:    100,
 	}
 	reversedPatch := store.FieldPatch{Operations: []store.FieldOperation{
@@ -110,7 +110,7 @@ func TestFieldPatchAppliesOverlappingOperationsInOrder(t *testing.T) {
 
 func TestFieldPatchIncrementRejectsNonNumericTarget(t *testing.T) {
 	object := &fieldPatchTestObject{
-		ObjectMeta: store.ObjectMeta{ResourceVersion: 1},
+		ObjectMeta: store.ObjectMeta{ResourceVersion: "1"},
 		Balance:    10,
 	}
 	note := "text"
@@ -125,7 +125,7 @@ func TestFieldPatchIncrementRejectsNonNumericTarget(t *testing.T) {
 
 func TestFieldPatchExpressionUnsupported(t *testing.T) {
 	object := &fieldPatchTestObject{
-		ObjectMeta: store.ObjectMeta{ResourceVersion: 1},
+		ObjectMeta: store.ObjectMeta{ResourceVersion: "1"},
 		Balance:    10,
 	}
 	expr := store.Add(store.Field("balance"), store.Literal(int64(1)))

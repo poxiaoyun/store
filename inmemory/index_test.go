@@ -72,7 +72,7 @@ func TestIndexUsesCommittedVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(result.Items) != 1 || result.Items[0].ResourceVersion != object.ResourceVersion {
-			t.Fatalf("committed version %d: %+v", object.ResourceVersion, result.Items)
+			t.Fatalf("committed version %q: %+v", object.ResourceVersion, result.Items)
 		}
 		count, err := source.Count(t.Context(), &item{}, condition)
 		if err != nil || count != 1 {
@@ -160,11 +160,11 @@ func TestUniqueIndexFailedWritesPreserveState(t *testing.T) {
 			case "patch":
 				err = cache.Patch(t.Context(), &desired, patch)
 			case "stale update":
-				desired.ResourceVersion++
+				desired.ResourceVersion = original.ResourceVersion + "-stale"
 				err = cache.Update(t.Context(), &desired)
 			case "stale patch":
-				version := original.ResourceVersion + 1
-				err = cache.Patch(t.Context(), &desired, patch, store.WithPreconditions(store.Preconditions{ResourceVersion: &version}))
+				version := original.ResourceVersion + "-stale"
+				err = cache.Patch(t.Context(), &desired, patch, store.WithPreconditions(store.Preconditions{ResourceVersion: version}))
 			}
 			if strings.HasPrefix(operation, "stale") {
 				if !commonerrors.IsConflict(err) {
@@ -179,14 +179,14 @@ func TestUniqueIndexFailedWritesPreserveState(t *testing.T) {
 			}
 			until(t, func() bool {
 				marker := &item{}
-				if err := cache.Get(t.Context(), "barrier", marker, store.WithResourceVersion(0)); err != nil {
+				if err := cache.Get(t.Context(), "barrier", marker, store.WithResourceVersion("0")); err != nil {
 					t.Fatal(err)
 				}
 				return marker.Code == operation
 			})
 			for _, view := range []store.Store{source, cache} {
 				got := &item{}
-				if err := view.Get(t.Context(), "a", got, store.WithResourceVersion(0)); err != nil {
+				if err := view.Get(t.Context(), "a", got, store.WithResourceVersion("0")); err != nil {
 					t.Fatal(err)
 				}
 				if !reflect.DeepEqual(got, original) {
@@ -194,7 +194,7 @@ func TestUniqueIndexFailedWritesPreserveState(t *testing.T) {
 				}
 				for _, predicate := range []selector.Requirement{selector.RequirementEqual("group", "alpha"), selector.RequirementEqual("code", "old")} {
 					result := &store.List[item]{}
-					if err := view.List(t.Context(), result, store.WithResourceVersion(0), store.WithFieldRequirements(predicate)); err != nil {
+					if err := view.List(t.Context(), result, store.WithResourceVersion("0"), store.WithFieldRequirements(predicate)); err != nil {
 						t.Fatal(err)
 					}
 					if len(result.Items) != 1 || result.Items[0].ID != "a" || result.Items[0].ResourceVersion != original.ResourceVersion {
@@ -202,7 +202,7 @@ func TestUniqueIndexFailedWritesPreserveState(t *testing.T) {
 					}
 				}
 				changed := &store.List[item]{}
-				if err := view.List(t.Context(), changed, store.WithResourceVersion(0), store.WithFieldRequirements(selector.RequirementEqual("code", "changed"))); err != nil {
+				if err := view.List(t.Context(), changed, store.WithResourceVersion("0"), store.WithFieldRequirements(selector.RequirementEqual("code", "changed"))); err != nil {
 					t.Fatal(err)
 				}
 				if len(changed.Items) != 0 {

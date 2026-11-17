@@ -46,9 +46,9 @@ func (e *EtcdStore) Watch(ctx context.Context, obj store.ObjectList, opts ...sto
 		key = e.core.getkey(e.scopes, resource, options.ID)
 		recursive = false
 	}
-	initialRev := int64(0)
-	if options.ResourceVersion != nil {
-		initialRev = *options.ResourceVersion
+	initialRev, err := parseRevision(options.ResourceVersion)
+	if err != nil {
+		return nil, err
 	}
 	watchCtx := clientv3.WithRequireLeader(ctx)
 	if initialRev > 0 || !options.SendInitialEvents {
@@ -302,7 +302,7 @@ func (w *etcdWatcher) processEvent(ctx context.Context) error {
 
 func (w *etcdWatcher) parseEvent(e *etcdEvent) (*store.WatchEvent, error) {
 	if e.isBookmark {
-		return &store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: e.bookmarkVersion}, nil
+		return &store.WatchEvent{Type: store.WatchEventBookmark, ResourceVersion: formatRevision(e.bookmarkVersion)}, nil
 	}
 	old, err := w.decodeObject(e.oldValue, e.oldRevision)
 	if err != nil {
@@ -322,11 +322,11 @@ func (w *etcdWatcher) parseEvent(e *etcdEvent) (*store.WatchEvent, error) {
 	}
 	switch {
 	case !oldMatches && newMatches:
-		return &store.WatchEvent{Type: store.WatchEventCreate, Object: new, ResourceVersion: e.checkpoint}, nil
+		return &store.WatchEvent{Type: store.WatchEventCreate, Object: new, ResourceVersion: formatRevision(e.checkpoint)}, nil
 	case oldMatches && newMatches:
-		return &store.WatchEvent{Type: store.WatchEventUpdate, Object: new, ResourceVersion: e.checkpoint}, nil
+		return &store.WatchEvent{Type: store.WatchEventUpdate, Object: new, ResourceVersion: formatRevision(e.checkpoint)}, nil
 	case oldMatches && !newMatches:
-		return &store.WatchEvent{Type: store.WatchEventDelete, Object: old, ResourceVersion: e.checkpoint}, nil
+		return &store.WatchEvent{Type: store.WatchEventDelete, Object: old, ResourceVersion: formatRevision(e.checkpoint)}, nil
 	default:
 		return nil, nil
 	}
@@ -340,7 +340,7 @@ func (w *etcdWatcher) decodeObject(value []byte, revision int64) (store.Object, 
 	if err := w.core.serializer.Decode(value, object); err != nil {
 		return nil, err
 	}
-	object.SetResourceVersion(revision)
+	object.SetResourceVersion(formatRevision(revision))
 	return object, nil
 }
 

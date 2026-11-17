@@ -30,14 +30,14 @@ func ApplyPatch(current store.Object, request store.Object, patch store.Patch) e
 		return JsonPatchObject(current, patchData)
 	case store.PatchTypeMergePatch:
 		condition := struct {
-			ResourceVersion *int64 `json:"resourceVersion"`
+			ResourceVersion *string `json:"resourceVersion"`
 		}{}
 		if err := json.Unmarshal(patchData, &condition); err != nil {
 			return errors.NewBadRequest(err.Error())
 		}
-		if condition.ResourceVersion != nil && *condition.ResourceVersion != 0 && *condition.ResourceVersion != current.GetResourceVersion() {
+		if condition.ResourceVersion != nil && *condition.ResourceVersion != "" && *condition.ResourceVersion != current.GetResourceVersion() {
 			return errors.NewConflict(current.GetResource(), current.GetID(),
-				fmt.Errorf("resourceVersion %d does not match", *condition.ResourceVersion))
+				fmt.Errorf("resourceVersion %s does not match", *condition.ResourceVersion))
 		}
 		return JsonMergePatchObject(current, patchData)
 	case store.PatchTypeFieldPatch:

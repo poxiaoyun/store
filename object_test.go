@@ -10,12 +10,12 @@ import (
 
 func TestListConversionsPreserveReadResult(t *testing.T) {
 	list := store.List[int]{
-		ResourceVersion: 11,
+		ResourceVersion: "11",
 		Items:           []int{1, 2},
 	}
 
 	converted := store.ConvertList(list, func(value int) string { return string(rune('a' + value - 1)) })
-	if converted.ResourceVersion != 11 {
+	if converted.ResourceVersion != "11" {
 		t.Fatalf("ConvertList() metadata = %#v", converted)
 	}
 	if !reflect.DeepEqual(converted.Items, []string{"a", "b"}) {
@@ -23,7 +23,7 @@ func TestListConversionsPreserveReadResult(t *testing.T) {
 	}
 
 	page := store.PageFromList(list, meta.ListOptions{Page: 2, Size: 20})
-	if page.ResourceVersion != 11 || page.Page != 2 || page.Size != 20 || page.Continue != "" || page.Limit != 0 {
+	if page.ResourceVersion != "11" || page.Page != 2 || page.Size != 20 || page.Continue != "" || page.Limit != 0 {
 		t.Fatalf("PageFromList() metadata = %#v", page)
 	}
 	if !reflect.DeepEqual(page.Items, []int{1, 2}) {

@@ -102,12 +102,12 @@ func TestListObjectsOrWatchPassesRequestFiltersToWatch(t *testing.T) {
 		storage,
 		&store.List[objectAdapterFixture]{},
 		store.WithSubScopes(),
-		store.WithResourceVersion(7),
+		store.WithResourceVersion("7"),
 	)
 	if !stderrors.Is(err, watchError) {
 		t.Fatalf("ListObjectsOrWatch() error = %v, want %v", err, watchError)
 	}
-	if storage.watchOptions.ResourceVersion == nil || *storage.watchOptions.ResourceVersion != 7 || !storage.watchOptions.IncludeSubScopes || !storage.watchOptions.SendInitialEvents {
+	if storage.watchOptions.ResourceVersion != "7" || !storage.watchOptions.IncludeSubScopes || !storage.watchOptions.SendInitialEvents {
 		t.Fatalf("snapshot options = %#v", storage.watchOptions)
 	}
 	if !reflect.DeepEqual(storage.watchOptions.LabelRequirements, store.Requirements{selector.RequirementEqual("environment", "production")}) {
@@ -120,13 +120,13 @@ func TestListObjectsOrWatchPassesRequestFiltersToWatch(t *testing.T) {
 
 func TestUpdateObjectPreservesResourceVersion(t *testing.T) {
 	storage := newObjectAdapterStore()
-	request := httptest.NewRequest(http.MethodPut, "/objects/object-1", strings.NewReader(`{"id":"object-1","resourceVersion":7}`))
+	request := httptest.NewRequest(http.MethodPut, "/objects/object-1", strings.NewReader(`{"id":"object-1","resourceVersion":"7"}`))
 	request.Header.Set("Content-Type", "application/json")
 
 	if _, err := UpdateObject(request, storage, &objectAdapterFixture{}, "object-1"); err != nil {
 		t.Fatal(err)
 	}
-	if storage.updated.GetResourceVersion() != 7 {
-		t.Fatalf("ResourceVersion = %d, want 7", storage.updated.GetResourceVersion())
+	if storage.updated.GetResourceVersion() != "7" {
+		t.Fatalf("ResourceVersion = %q, want 7", storage.updated.GetResourceVersion())
 	}
 }

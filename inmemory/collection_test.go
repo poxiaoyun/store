@@ -170,7 +170,7 @@ func TestConcurrentIndexedSnapshots(t *testing.T) {
 			started <- struct{}{}
 			for {
 				result := &store.List[item]{}
-				if err := view.List(t.Context(), result, store.WithResourceVersion(0), store.WithFieldRequirements(selector.RequirementGreaterThanOrEqual("number", 0)), store.WithSort("number+,id+")); err != nil {
+				if err := view.List(t.Context(), result, store.WithResourceVersion("0"), store.WithFieldRequirements(selector.RequirementGreaterThanOrEqual("number", 0)), store.WithSort("number+,id+")); err != nil {
 					t.Error(err)
 					return
 				}
@@ -216,7 +216,7 @@ func TestConcurrentIndexedSnapshots(t *testing.T) {
 	}
 	until(t, func() bool {
 		result := &store.List[item]{}
-		if err := cache.List(t.Context(), result, store.WithResourceVersion(0), store.WithFieldRequirements(selector.RequirementEqual("number", 4))); err != nil {
+		if err := cache.List(t.Context(), result, store.WithResourceVersion("0"), store.WithFieldRequirements(selector.RequirementEqual("number", 4))); err != nil {
 			t.Fatal(err)
 		}
 		return len(result.Items) == 16

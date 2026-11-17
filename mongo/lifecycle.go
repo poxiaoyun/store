@@ -5,18 +5,29 @@ import (
 	"math/big"
 	"reflect"
 	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
 	"xiaoshiai.cn/common/errors"
 	"xiaoshiai.cn/store"
 )
 
+// nextResourceVersion advances the numeric encoding this adapter stores while
+// the contract keeps resourceVersion opaque.
+func nextResourceVersion(current string) (string, error) {
+	value, err := strconv.ParseInt(current, 10, 64)
+	if err != nil || value <= 0 {
+		return "", errors.NewBadRequest("resourceVersion is not a MongoDB version")
+	}
+	return strconv.FormatInt(value+1, 10), nil
+}
+
 func prepareObjectForCreate(obj store.Object, resource string, scopes []store.Scope) {
 	if obj.GetID() == "" {
 		obj.SetID(uuid.NewString())
 	}
 	obj.SetUID(uuid.NewString())
-	obj.SetResourceVersion(0)
+	obj.SetResourceVersion("")
 	obj.SetGeneration(1)
 	obj.SetCreationTimestamp(store.ServerTimestampNow())
 	obj.SetDeletionTimestamp(nil)

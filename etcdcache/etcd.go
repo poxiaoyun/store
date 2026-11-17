@@ -7,7 +7,6 @@ import (
 	"path"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -287,8 +286,8 @@ func (c *generic) Delete(ctx context.Context, obj store.Object, opts ...store.De
 		if options.Preconditions.UID != nil {
 			preconditions.UID = ptr.To(types.UID(*options.Preconditions.UID))
 		}
-		if options.Preconditions.ResourceVersion != nil {
-			preconditions.ResourceVersion = ptr.To(strconv.FormatInt(*options.Preconditions.ResourceVersion, 10))
+		if options.Preconditions.ResourceVersion != "" {
+			preconditions.ResourceVersion = ptr.To(options.Preconditions.ResourceVersion)
 		}
 	}
 	predicate, err := ConvertPredicate(nil, nil)
@@ -328,7 +327,7 @@ func (c *generic) Get(ctx context.Context, name string, obj store.Object, opts .
 			// if resource version is empty, underlying storage will passthrough to etcd
 			// if set to 0, underlying storage will return the cached object
 			// if set to a number, underlying storage will return the object with the same resource version
-			ResourceVersion: formatResourceVersion(options.ResourceVersion),
+			ResourceVersion: options.ResourceVersion,
 		}
 		if err := db.storage.Get(ctx, key, storageOptions, uns); err != nil {
 			err = storeerr.InterpretGetError(err, db.resource, name)
@@ -381,7 +380,7 @@ func (c *generic) List(ctx context.Context, list store.ObjectList, opts ...store
 			listopts := storage.ListOptions{
 				Recursive:       true,
 				Predicate:       predicate,
-				ResourceVersion: formatResourceVersion(options.ResourceVersion),
+				ResourceVersion: options.ResourceVersion,
 			}
 			unslist := &StorageObjectList{}
 			if err := db.storage.GetList(ctx, keyprefix, listopts, unslist); err != nil {
@@ -442,13 +441,6 @@ func (c *generic) List(ctx context.Context, list store.ObjectList, opts ...store
 	})
 }
 
-func formatResourceVersion(i *int64) string {
-	if i == nil {
-		return ""
-	}
-	return strconv.FormatInt(*i, 10)
-}
-
 // Patch implements store.Store.
 func (c *generic) Patch(ctx context.Context, obj store.Object, patch store.Patch, opts ...store.PatchOption) error {
 	options := store.ApplyPatchOptions(opts)
@@ -502,8 +494,8 @@ func (c *generic) Update(ctx context.Context, obj store.Object, opts ...store.Up
 	if obj.GetUID() != "" {
 		preconditions.UID = ptr.To(types.UID(obj.GetUID()))
 	}
-	if rev := obj.GetResourceVersion(); rev != 0 {
-		preconditions.ResourceVersion = ptr.To(strconv.FormatInt(rev, 10))
+	if rev := obj.GetResourceVersion(); rev != "" {
+		preconditions.ResourceVersion = ptr.To(rev)
 	}
 	predicate, err := ConvertPredicate(options.LabelRequirements, options.FieldRequirements)
 	if err != nil {
@@ -571,8 +563,8 @@ func (s *status) Update(ctx context.Context, obj store.Object, opts ...store.Upd
 	if obj.GetUID() != "" {
 		preconditions.UID = ptr.To(types.UID(obj.GetUID()))
 	}
-	if rev := obj.GetResourceVersion(); rev != 0 {
-		preconditions.ResourceVersion = ptr.To(strconv.FormatInt(rev, 10))
+	if rev := obj.GetResourceVersion(); rev != "" {
+		preconditions.ResourceVersion = ptr.To(rev)
 	}
 	predicate, err := ConvertPredicate(options.LabelRequirements, options.FieldRequirements)
 	if err != nil {
